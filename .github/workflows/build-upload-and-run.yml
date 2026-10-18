@@ -7,7 +7,7 @@ on:
 
 env:
   # Set your Databricks host (workspace URL) here if you prefer (or keep as is)
-  DATABRICKS_HOST: https://dbc-399c543d-3654.cloud.databricks.com
+  DATABRICKS_HOST: https://dbc-702a0a68-ef83.cloud.databricks.com
   DBFS_TARGET: dbfs:/FileStore/jars/synopsislake.jar
   # Default dataset path (change to your Repos path or DBFS path)
   DATASET_PATH: "/Workspace/Users/kyang2333@gmail.com/SynopsisLake/pyspark-migration/spatial_join/0.csv"
@@ -64,29 +64,8 @@ jobs:
           databricks fs cp "$JAR" "${{ env.DBFS_TARGET }}" --overwrite
           echo "Uploaded to ${DBFS_TARGET}"
 
-      - name: Trigger existing Databricks Job (run-now) if DATABRICKS_JOB_ID is set
-        if: ${{ secrets.DATABRICKS_JOB_ID != '' }}
-        env:
-          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: |
-          echo "Triggering run-now for job id: ${{ secrets.DATABRICKS_JOB_ID }}"
-          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
-            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"job_id\":${{ secrets.DATABRICKS_JOB_ID }}}")
-          echo "Response: $RESPONSE"
-          RUN_ID=$(echo "$RESPONSE" | jq -r '.run_id // empty')
-          if [ -z "$RUN_ID" ]; then
-            echo "Failed to obtain run_id from jobs/run-now response."
-            echo "Full response: $RESPONSE"
-            exit 1
-          fi
-          echo "Run ID: $RUN_ID"
-          echo "$RUN_ID" > run_id.txt
-
-      - name: Submit one-off run on existing cluster if DATABRICKS_CLUSTER_ID is set and no JOB_ID provided
-        if: ${{ secrets.DATABRICKS_JOB_ID == '' && secrets.DATABRICKS_CLUSTER_ID != '' }}
+      - name: Ensure Databricks Job exists (find by name or create)
+        id: ensure-job
         env:
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -99,38 +78,100 @@ jobs:
           NUM_RECORDS: ${{ env.NUM_RECORDS }}
           WRITE_DATA_FILE_INT: ${{ env.WRITE_DATA_FILE_INT }}
         run: |
-          CLUSTER_ID=${{ secrets.DATABRICKS_CLUSTER_ID }}
-          echo "Submitting run on existing cluster: $CLUSTER_ID"
-          cat > run-payload.json <<EOF
-{
-  "run_name": "CI-triggered: SynopsisLake",
-  "existing_cluster_id": "${CLUSTER_ID}",
-  "libraries": [
-    { "jar": "${DBFS_TARGET}" }
-  ],
-  "spark_jar_task": {
-    "main_class_name": "SynopsisLake.SynopsisOverheadExp",
-    "parameters": [
-      "-HDFSURI", "file:///dbfs/tmp/synout",
-      "-datasetPath", "${DATASET_PATH}",
-      "-synopsisFolder", "${SYNOPSIS_FOLDER}",
-      "-synopsisType", "${SYNOPSIS_TYPE}",
-      "-synopsisResolution", "${SYNOPSIS_RESOLUTION}",
-      "-numFile", "${NUM_FILE}",
-      "-numOfRecordPerFile", "${NUM_RECORDS}",
-      "-writeDataFileInt", "${WRITE_DATA_FILE_INT}"
-    ]
-  }
-}
-EOF
-          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/runs/submit" \
+          JOB_NAME="SynopsisLake - CI JAR Run"
+
+          # If a job ID is already provided as a secret, use it directly
+          PROVIDED_ID="${{ secrets.DATABRICKS_JOB_ID }}"
+          if [ -n "$PROVIDED_ID" ]; then
+            echo "Using job id from DATABRICKS_JOB_ID secret: $PROVIDED_ID"
+            echo "job_id=$PROVIDED_ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Need CLUSTER_ID to create/find a job
+          CLUSTER_ID="${{ secrets.DATABRICKS_CLUSTER_ID }}"
+          if [ -z "$CLUSTER_ID" ]; then
+            echo "Neither DATABRICKS_JOB_ID nor DATABRICKS_CLUSTER_ID is set. Skipping."
+            exit 0
+          fi
+
+          # Search for an existing job by name
+          echo "Searching for job '$JOB_NAME'..."
+          ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$JOB_NAME'))")
+          JOBS=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/list?name=${ENCODED_NAME}" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
+          EXISTING_ID=$(echo "$JOBS" | jq -r '.jobs[0].job_id // empty')
+
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Found existing job '$JOB_NAME' with id: $EXISTING_ID"
+            echo "job_id=$EXISTING_ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Create the job
+          echo "No existing job found. Creating '$JOB_NAME'..."
+          jq -n \
+            --arg name "$JOB_NAME" \
+            --arg cluster_id "$CLUSTER_ID" \
+            --arg dbfs_target "$DBFS_TARGET" \
+            --arg dataset_path "$DATASET_PATH" \
+            --arg synopsis_folder "$SYNOPSIS_FOLDER" \
+            --arg synopsis_type "$SYNOPSIS_TYPE" \
+            --arg synopsis_resolution "$SYNOPSIS_RESOLUTION" \
+            --arg num_file "$NUM_FILE" \
+            --arg num_records "$NUM_RECORDS" \
+            --arg write_data_file_int "$WRITE_DATA_FILE_INT" \
+            '{
+              name: $name,
+              tasks: [{
+                task_key: "synopsis_jar",
+                existing_cluster_id: $cluster_id,
+                libraries: [{ jar: $dbfs_target }],
+                spark_jar_task: {
+                  main_class_name: "SynopsisLake.SynopsisOverheadExp",
+                  parameters: [
+                    "-HDFSURI", "file:///dbfs/tmp/synout",
+                    "-datasetPath", $dataset_path,
+                    "-synopsisFolder", $synopsis_folder,
+                    "-synopsisType", $synopsis_type,
+                    "-synopsisResolution", $synopsis_resolution,
+                    "-numFile", $num_file,
+                    "-numOfRecordPerFile", $num_records,
+                    "-writeDataFileInt", $write_data_file_int
+                  ]
+                }
+              }]
+            }' > job-create-payload.json
+
+          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/create" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d @run-payload.json)
+            -d @job-create-payload.json)
+          echo "Response: $RESPONSE"
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
+          if [ -z "$JOB_ID" ]; then
+            echo "Failed to create job. Full response: $RESPONSE"
+            exit 1
+          fi
+          echo "Created job '$JOB_NAME' with id: $JOB_ID"
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Databricks Job (run-now)
+        if: ${{ steps.ensure-job.outputs.job_id != '' }}
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          JOB_ID=${{ steps.ensure-job.outputs.job_id }}
+          echo "Triggering run-now for job id: $JOB_ID"
+          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\":$JOB_ID}")
           echo "Response: $RESPONSE"
           RUN_ID=$(echo "$RESPONSE" | jq -r '.run_id // empty')
           if [ -z "$RUN_ID" ]; then
-            echo "Failed to obtain run_id from runs/submit response."
+            echo "Failed to obtain run_id from jobs/run-now response."
             echo "Full response: $RESPONSE"
             exit 1
           fi

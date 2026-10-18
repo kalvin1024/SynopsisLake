@@ -1,6 +1,6 @@
 {
   "name": "SynopsisLake - CI JAR Run",
-  "existing_cluster_id": "1018-050329-es3nzbio",
+  "existing_cluster_id": "1018-062526-j4qp9mog",
   "libraries": [
     { "jar": "dbfs:/FileStore/jars/synopsislake.jar" }
   ],
