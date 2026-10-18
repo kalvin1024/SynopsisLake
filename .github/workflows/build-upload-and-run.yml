@@ -1,0 +1,197 @@
+name: Build JAR, upload to DBFS and trigger Databricks run
+
+on:
+  push:
+    branches: [ "pyspark-migration", "main" ]
+  workflow_dispatch:
+
+env:
+  # Set your Databricks host (workspace URL) here if you prefer (or keep as is)
+  DATABRICKS_HOST: https://dbc-399c543d-3654.cloud.databricks.com
+  DBFS_TARGET: dbfs:/FileStore/jars/synopsislake.jar
+  # Default dataset path (change to your Repos path or DBFS path)
+  DATASET_PATH: "/Workspace/Users/kyang2333@gmail.com/SynopsisLake/pyspark-migration/spatial_join/0.csv"
+  # Default parameters passed to the Java main (edit if you want other defaults)
+  SYNOPSIS_FOLDER: "synout"
+  SYNOPSIS_TYPE: "4"
+  SYNOPSIS_RESOLUTION: "128"
+  NUM_FILE: "5"
+  NUM_RECORDS: "10000"
+  WRITE_DATA_FILE_INT: "0"
+  # Polling timeout (minutes)
+  MAX_WAIT_MINUTES: "30"
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
+
+      - name: Build with Maven (skip tests)
+        run: mvn -B -DskipTests package
+
+      - name: Install databricks-cli and jq
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade databricks-cli
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Upload JAR to Databricks DBFS
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          JAR=$(ls target/*SNAPSHOT.jar | head -n 1)
+          echo "Found JAR: $JAR"
+          export DATABRICKS_HOST=${DATABRICKS_HOST}
+          export DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
+          databricks fs cp "$JAR" "${{ env.DBFS_TARGET }}" --overwrite
+          echo "Uploaded to ${DBFS_TARGET}"
+
+      - name: Trigger existing Databricks Job (run-now) if DATABRICKS_JOB_ID is set
+        if: ${{ secrets.DATABRICKS_JOB_ID != '' }}
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Triggering run-now for job id: ${{ secrets.DATABRICKS_JOB_ID }}"
+          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\":${{ secrets.DATABRICKS_JOB_ID }}}")
+          echo "Response: $RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | jq -r '.run_id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "Failed to obtain run_id from jobs/run-now response."
+            echo "Full response: $RESPONSE"
+            exit 1
+          fi
+          echo "Run ID: $RUN_ID"
+          echo "$RUN_ID" > run_id.txt
+
+      - name: Submit one-off run on existing cluster if DATABRICKS_CLUSTER_ID is set and no JOB_ID provided
+        if: ${{ secrets.DATABRICKS_JOB_ID == '' && secrets.DATABRICKS_CLUSTER_ID != '' }}
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DBFS_TARGET: ${{ env.DBFS_TARGET }}
+          DATASET_PATH: ${{ env.DATASET_PATH }}
+          SYNOPSIS_FOLDER: ${{ env.SYNOPSIS_FOLDER }}
+          SYNOPSIS_TYPE: ${{ env.SYNOPSIS_TYPE }}
+          SYNOPSIS_RESOLUTION: ${{ env.SYNOPSIS_RESOLUTION }}
+          NUM_FILE: ${{ env.NUM_FILE }}
+          NUM_RECORDS: ${{ env.NUM_RECORDS }}
+          WRITE_DATA_FILE_INT: ${{ env.WRITE_DATA_FILE_INT }}
+        run: |
+          CLUSTER_ID=${{ secrets.DATABRICKS_CLUSTER_ID }}
+          echo "Submitting run on existing cluster: $CLUSTER_ID"
+          cat > run-payload.json <<EOF
+{
+  "run_name": "CI-triggered: SynopsisLake",
+  "existing_cluster_id": "${CLUSTER_ID}",
+  "libraries": [
+    { "jar": "${DBFS_TARGET}" }
+  ],
+  "spark_jar_task": {
+    "main_class_name": "SynopsisLake.SynopsisOverheadExp",
+    "parameters": [
+      "-HDFSURI", "file:///dbfs/tmp/synout",
+      "-datasetPath", "${DATASET_PATH}",
+      "-synopsisFolder", "${SYNOPSIS_FOLDER}",
+      "-synopsisType", "${SYNOPSIS_TYPE}",
+      "-synopsisResolution", "${SYNOPSIS_RESOLUTION}",
+      "-numFile", "${NUM_FILE}",
+      "-numOfRecordPerFile", "${NUM_RECORDS}",
+      "-writeDataFileInt", "${WRITE_DATA_FILE_INT}"
+    ]
+  }
+}
+EOF
+          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/runs/submit" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @run-payload.json)
+          echo "Response: $RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | jq -r '.run_id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "Failed to obtain run_id from runs/submit response."
+            echo "Full response: $RESPONSE"
+            exit 1
+          fi
+          echo "Run ID: $RUN_ID"
+          echo "$RUN_ID" > run_id.txt
+
+      - name: Poll Databricks run status and fail CI on non-success
+        if: always()
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MAX_WAIT_MINUTES: ${{ env.MAX_WAIT_MINUTES }}
+        run: |
+          # Only run if run_id.txt exists (i.e., a run was submitted)
+          if [ ! -f run_id.txt ]; then
+            echo "No run_id.txt found; no Databricks run was triggered. Skipping status poll."
+            exit 0
+          fi
+
+          RUN_ID=$(cat run_id.txt)
+          echo "Polling Databricks run_id: $RUN_ID"
+          START_TS=$(date +%s)
+          MAX_WAIT_SECONDS=$(( MAX_WAIT_MINUTES * 60 ))
+          INTERVAL=15
+
+          while true; do
+            RESPONSE=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
+            echo "Status response: $RESPONSE"
+            LIFE_CYCLE_STATE=$(echo "$RESPONSE" | jq -r '.state.life_cycle_state // empty')
+            RESULT_STATE=$(echo "$RESPONSE" | jq -r '.state.result_state // empty')
+            RUN_PAGE_URL=$(echo "$RESPONSE" | jq -r '.run_page_url // empty')
+
+            echo "life_cycle_state: $LIFE_CYCLE_STATE"
+            echo "result_state: $RESULT_STATE"
+            echo "run_page_url: $RUN_PAGE_URL"
+
+            if [ "$LIFE_CYCLE_STATE" = "TERMINATED" ] || [ "$LIFE_CYCLE_STATE" = "SKIPPED" ] || [ "$LIFE_CYCLE_STATE" = "INTERNAL_ERROR" ]; then
+              echo "Run completed with life_cycle_state=$LIFE_CYCLE_STATE and result_state=$RESULT_STATE"
+              if [ "$RESULT_STATE" = "SUCCESS" ]; then
+                echo "Databricks run succeeded (run_id=$RUN_ID)."
+                exit 0
+              else
+                echo "Databricks run failed (run_id=$RUN_ID). Fetching run diagnostics..."
+                echo "Run page URL: $RUN_PAGE_URL"
+                # Print brief summary and exit non-zero to fail the workflow
+                echo "Full state JSON:"
+                echo "$RESPONSE" | jq '.state'
+                exit 1
+              fi
+            fi
+
+            # check timeout
+            NOW_TS=$(date +%s)
+            ELAPSED=$(( NOW_TS - START_TS ))
+            if [ $ELAPSED -ge $MAX_WAIT_SECONDS ]; then
+              echo "Polling timed out after ${MAX_WAIT_MINUTES} minutes. Last response:"
+              echo "$RESPONSE" | jq '.state'
+              exit 1
+            fi
+
+            echo "Run still in progress (life_cycle_state=$LIFE_CYCLE_STATE). Sleeping ${INTERVAL}s..."
+            sleep $INTERVAL
+          done

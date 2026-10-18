@@ -43,7 +43,8 @@ public class SynopsisOverheadExp {
 		Logger.getLogger("org").setLevel(Level.OFF);
 		Logger.getLogger("akka").setLevel(Level.OFF);
 		SparkConf sparkCond = new SparkConf().setAppName(expName);
-		sparkCond.set("spark.driver.memory", "100g");
+		sparkCond.set("spark.driver.memory", "4g");
+//		sparkCond.set("spark.driver.memory", "100g"); //TODO: add back in prod
 //		sparkCond.set("spark.executor.memory", "100g");
 		sparkCond.set("spark.memory.offHeap.enabled", "true");
 		sparkCond.set("spark.memory.offHeap.size", "16g");

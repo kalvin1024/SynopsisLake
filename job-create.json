@@ -1,0 +1,20 @@
+{
+  "name": "SynopsisLake - CI JAR Run",
+  "existing_cluster_id": "1018-050329-es3nzbio",
+  "libraries": [
+    { "jar": "dbfs:/FileStore/jars/synopsislake.jar" }
+  ],
+  "spark_jar_task": {
+    "main_class_name": "SynopsisLake.SynopsisOverheadExp",
+    "parameters": [
+      "-HDFSURI", "file:///dbfs/tmp/synout",
+      "-datasetPath", "/Workspace/Repos/kyang2333@gmail.com/SynopsisLake/pyspark-migration/spatial_join/0.csv",
+      "-synopsisFolder", "synout",
+      "-synopsisType", "4",
+      "-synopsisResolution", "128",
+      "-numFile", "5",
+      "-numOfRecordPerFile", "10000",
+      "-writeDataFileInt", "0"
+    ]
+  }
+}
