@@ -104,7 +104,9 @@ public class SynopsisOverheadExp {
 		long startParquet = System.nanoTime();
 		ArrayList<ParquetRow> list = sizeAccu.value();
 
-		String parquetFilePath = HDFSURI + "/" + synopsisFolder + "/syno";
+		// Spark writers need a Volumes path without the file: scheme
+		String parquetFilePath = HDFSURI.replaceFirst("^file:(//)?", "") + "/" + synopsisFolder + "/syno";
+
 		writeParquetFile(list, spark, parquetFilePath, synopsisType);
 		long endParquet = System.nanoTime();
 		long durationParquet = endParquet - startParquet;
@@ -188,10 +190,10 @@ public class SynopsisOverheadExp {
 			System.out.println("Load " + parallelLines.size() + " files.");
 		} catch (FileNotFoundException e1) {
 			// TODO Auto-generated catch block
-			e1.printStackTrace();
+			throw new RuntimeException("Dataset not found: " + datasetPath, e1);
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
-			e.printStackTrace();
+			throw new RuntimeException("Failed reading dataset: " + datasetPath, e);
 		}
 
 		return parallelLines;

@@ -10,7 +10,7 @@ env:
   DATABRICKS_HOST: https://dbc-702a0a68-ef83.cloud.databricks.com
   JAR_VOLUME_PATH: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar
   # Default dataset path (change to your Repos path or DBFS path)
-  DATASET_PATH: "/Workspace/Shared/SynopsisLake/SynopsisLake/pyspark-migration/spatial_join/0.csv"
+  DATASET_PATH: "/Workspace/Shared/SynopsisLake/spatial_join/0.csv"
   # Default parameters passed to the Java main (edit if you want other defaults)
   SYNOPSIS_FOLDER: "synout"
   SYNOPSIS_TYPE: "4"
