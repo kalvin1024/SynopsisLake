@@ -132,7 +132,7 @@ jobs:
           fi
           echo "Uploaded to ${{ env.JAR_VOLUME_PATH }}"
 
-      - name: Ensure Databricks Job exists (find by name or create)
+      - name: Create or update Databricks Job (applies cluster definition every run)
         id: ensure-job
         env:
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
@@ -148,39 +148,10 @@ jobs:
         run: |
           JOB_NAME="SynopsisLake - CI JAR Run"
 
-          # If a job ID is already provided as a secret, use it directly
-          PROVIDED_ID="${{ secrets.DATABRICKS_JOB_ID }}"
-          if [ -n "$PROVIDED_ID" ]; then
-            echo "Using job id from DATABRICKS_JOB_ID secret: $PROVIDED_ID"
-            echo "job_id=$PROVIDED_ID" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Need CLUSTER_ID to create/find a job
-          CLUSTER_ID="${{ secrets.DATABRICKS_CLUSTER_ID }}"
-          if [ -z "$CLUSTER_ID" ]; then
-            echo "Neither DATABRICKS_JOB_ID nor DATABRICKS_CLUSTER_ID is set. Skipping."
-            exit 0
-          fi
-
-          # Search for an existing job by name
-          echo "Searching for job '$JOB_NAME'..."
-          ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$JOB_NAME'))")
-          JOBS=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/list?name=${ENCODED_NAME}" \
-            -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
-          EXISTING_ID=$(echo "$JOBS" | jq -r '.jobs[0].job_id // empty')
-
-          if [ -n "$EXISTING_ID" ]; then
-            echo "Found existing job '$JOB_NAME' with id: $EXISTING_ID"
-            echo "job_id=$EXISTING_ID" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Create the job
-          echo "No existing job found. Creating '$JOB_NAME'..."
+          # Build the job settings once. They are used for both create and update,
+          # so the cluster/task definition in this file is always applied to the job.
           jq -n \
             --arg name "$JOB_NAME" \
-            --arg cluster_id "$CLUSTER_ID" \
             --arg jar_path "$JAR_VOLUME_PATH" \
             --arg dataset_path "$DATASET_PATH" \
             --arg synopsis_folder "$SYNOPSIS_FOLDER" \
@@ -193,7 +164,26 @@ jobs:
               name: $name,
               tasks: [{
                 task_key: "synopsis_jar",
-                existing_cluster_id: $cluster_id,
+                new_cluster: {
+                  spark_version: "13.3.x-scala2.12",
+                  node_type_id: "i3.xlarge",
+                  num_workers: 2,
+                  data_security_mode: "SINGLE_USER",
+                  enable_elastic_disk: true,
+                  spark_conf: {
+                    "spark.executor.memory": "16g",
+                    "spark.memory.offHeap.enabled": "true",
+                    "spark.memory.offHeap.size": "3g",
+                    "spark.rpc.message.maxSize": "1024"
+                  },
+                  aws_attributes: {
+                    availability: "SPOT_WITH_FALLBACK",
+                    first_on_demand: 1,
+                    zone_id: "auto",
+                    spot_bid_price_percent: 100
+                  },
+                  policy_id: "000A3B1024C72B42"
+                },
                 libraries: [{ jar: $jar_path }],
                 spark_jar_task: {
                   main_class_name: "SynopsisLake.SynopsisOverheadExp",
@@ -209,19 +199,53 @@ jobs:
                   ]
                 }
               }]
-            }' > job-create-payload.json
+            }' > job-settings.json
 
-          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/create" \
-            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d @job-create-payload.json)
-          echo "Response: $RESPONSE"
-          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
-          if [ -z "$JOB_ID" ]; then
-            echo "Failed to create job. Full response: $RESPONSE"
-            exit 1
+          # Resolve the job id: DATABRICKS_JOB_ID secret first, then lookup by name
+          JOB_ID="${{ secrets.DATABRICKS_JOB_ID }}"
+          if [ -n "$JOB_ID" ]; then
+            echo "Using job id from DATABRICKS_JOB_ID secret: $JOB_ID"
+          else
+            echo "Searching for job '$JOB_NAME'..."
+            ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$JOB_NAME'))")
+            JOBS=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/list?name=${ENCODED_NAME}" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
+            JOB_ID=$(echo "$JOBS" | jq -r '.jobs[0].job_id // empty')
           fi
-          echo "Created job '$JOB_NAME' with id: $JOB_ID"
+
+          if [ -n "$JOB_ID" ]; then
+            # Existing job: push the current cluster/task definition.
+            # jobs/update replaces the listed top-level fields; tasks are matched by task_key.
+            echo "Updating existing job '$JOB_NAME' ($JOB_ID) with current cluster definition..."
+            jq --argjson id "$JOB_ID" '{job_id: $id, new_settings: .}' job-settings.json > job-update-payload.json
+            UP_BODY=$(curl -s -w "\n%{http_code}" -X POST "${DATABRICKS_HOST}/api/2.1/jobs/update" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @job-update-payload.json)
+            UP_CODE=$(echo "$UP_BODY" | tail -n1)
+            UP_RESP=$(echo "$UP_BODY" | sed '$d')
+            echo "Update job HTTP $UP_CODE: $UP_RESP"
+            if [ "$UP_CODE" != "200" ]; then
+              echo "::error::Failed to update job $JOB_ID. HTTP $UP_CODE"
+              exit 1
+            fi
+            echo "Updated job '$JOB_NAME' with id: $JOB_ID"
+          else
+            # No job yet: create it with the same settings
+            echo "No existing job found. Creating '$JOB_NAME'..."
+            RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/create" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @job-settings.json)
+            echo "Response: $RESPONSE"
+            JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
+            if [ -z "$JOB_ID" ]; then
+              echo "::error::Failed to create job. Full response: $RESPONSE"
+              exit 1
+            fi
+            echo "Created job '$JOB_NAME' with id: $JOB_ID"
+          fi
+
           echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
 
       - name: Trigger Databricks Job (run-now)

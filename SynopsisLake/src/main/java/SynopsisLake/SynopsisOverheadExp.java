@@ -9,7 +9,6 @@ import java.util.ArrayList;
 
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
-import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.Dataset;
@@ -42,19 +41,11 @@ public class SynopsisOverheadExp {
 		this.numOfRecordPerFile = numOfRecordPerFile;
 		Logger.getLogger("org").setLevel(Level.OFF);
 		Logger.getLogger("akka").setLevel(Level.OFF);
-		SparkConf sparkCond = new SparkConf().setAppName(expName);
-		sparkCond.set("spark.driver.memory", "4g");
-//		sparkCond.set("spark.driver.memory", "100g"); //TODO: add back in prod
-//		sparkCond.set("spark.executor.memory", "100g");
-		sparkCond.set("spark.memory.offHeap.enabled", "true");
-		sparkCond.set("spark.memory.offHeap.size", "16g");
-		sparkCond.set("spark.rpc.message.maxSize", "1024");
-//		// Set Spark master to local if not already set
-		if (!sparkCond.contains("spark.master"))
-			sparkCond.setMaster("local[*]");
-		JavaSparkContext sc = new JavaSparkContext(sparkCond);
-
-		SparkSession spark = SparkSession.builder().config(sc.getConf()).getOrCreate();
+		// On Databricks the SparkSession/SparkContext already exist; reuse them.
+		// Startup-only settings (offHeap, rpc.message.maxSize) belong in the cluster spark_conf.
+		// For local runs, pass --master local[*] to spark-submit.
+		SparkSession spark = SparkSession.builder().appName(expName).getOrCreate();
+		JavaSparkContext sc = JavaSparkContext.fromSparkContext(spark.sparkContext());
 
 		// Then, create an Accumulator of this type:
 		BinaryFileSizeAccumulator<ParquetRow> sizeAccu = new BinaryFileSizeAccumulator<ParquetRow>();
@@ -122,8 +113,7 @@ public class SynopsisOverheadExp {
 		System.out.println("Create Parquet File Time = " + duration);
 		System.out.println("Write Parquet File Time = " + durationParquet);
 		System.out.println("Total time = " + (durationParquet + duration));
-		
-		sc.close();
+		// Do not stop the shared SparkContext on Databricks.
 	}
 	
 	private void writeParquetFile(ArrayList<ParquetRow> list, SparkSession spark, String parquetFilePath,
