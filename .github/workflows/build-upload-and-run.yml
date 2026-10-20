@@ -9,8 +9,13 @@ env:
   # Set your Databricks host (workspace URL) here if you prefer (or keep as is)
   DATABRICKS_HOST: https://dbc-702a0a68-ef83.cloud.databricks.com
   JAR_VOLUME_PATH: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar
-  # Default dataset path (change to your Repos path or DBFS path)
-  DATASET_PATH: "/Workspace/Shared/SynopsisLake/spatial_join/0.csv"
+  # UC volumes: jars = build artifacts, data = input datasets, output = job results
+  DATA_VOLUME_DIR: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data
+  OUTPUT_VOLUME_DIR: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/output
+  # Local repo folder whose CSVs are uploaded to DATA_VOLUME_DIR/spatial_join
+  LOCAL_DATA_DIR: spatial_join
+  # Dataset path read by the JAR (must be in a UC volume; /Workspace is not readable from java.io)
+  DATASET_PATH: "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data/spatial_join/0.csv"
   # Default parameters passed to the Java main (edit if you want other defaults)
   SYNOPSIS_FOLDER: "synout"
   SYNOPSIS_TYPE: "4"
@@ -69,7 +74,7 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure UC schema and volume exist
+      - name: Ensure UC schema and volumes exist
         env:
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -93,23 +98,51 @@ jobs:
             exit 1
           fi
 
-          echo "Creating volume jars if it does not exist..."
-          VL_BODY=$(curl -s -w "\n%{http_code}" \
-            -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/volumes" \
-            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{"catalog_name":"cs598_ccc_research_7474657373242960","schema_name":"synopsis_lake","name":"jars","volume_type":"MANAGED"}')
-          VL_CODE=$(echo "$VL_BODY" | tail -n1)
-          VL_RESP=$(echo "$VL_BODY" | sed '$d')
-          echo "Create volume HTTP $VL_CODE: $VL_RESP"
-          if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ] && [ "$VL_CODE" != "400" ]; then
-            echo "::error::Failed to create volume. HTTP $VL_CODE"
-            exit 1
+          for VOL in jars data output; do
+            echo "Creating volume $VOL if it does not exist..."
+            VL_BODY=$(curl -s -w "\n%{http_code}" \
+              -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/volumes" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"catalog_name\":\"cs598_ccc_research_7474657373242960\",\"schema_name\":\"synopsis_lake\",\"name\":\"${VOL}\",\"volume_type\":\"MANAGED\"}")
+            VL_CODE=$(echo "$VL_BODY" | tail -n1)
+            VL_RESP=$(echo "$VL_BODY" | sed '$d')
+            echo "Create volume $VOL HTTP $VL_CODE: $VL_RESP"
+            if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ] && [ "$VL_CODE" != "400" ]; then
+              echo "::error::Failed to create volume $VOL. HTTP $VL_CODE"
+              exit 1
+            fi
+            if [ "$VL_CODE" = "400" ] && ! echo "$VL_RESP" | grep -q "ALREADY_EXISTS"; then
+              echo "::error::Volume $VOL creation failed with unexpected 400 error."
+              exit 1
+            fi
+          done
+
+      - name: Upload input datasets to data volume
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATA_VOLUME_DIR: ${{ env.DATA_VOLUME_DIR }}
+          LOCAL_DATA_DIR: ${{ env.LOCAL_DATA_DIR }}
+        run: |
+          if [ ! -d "$LOCAL_DATA_DIR" ]; then
+            echo "::warning::Local data folder '$LOCAL_DATA_DIR' not found in repo; skipping dataset upload."
+            exit 0
           fi
-          if [ "$VL_CODE" = "400" ] && ! echo "$VL_RESP" | grep -q "ALREADY_EXISTS"; then
-            echo "::error::Volume creation failed with unexpected 400 error."
-            exit 1
-          fi
+          for f in "$LOCAL_DATA_DIR"/*.csv; do
+            [ -e "$f" ] || continue
+            DEST="${DATA_VOLUME_DIR}/spatial_join/$(basename "$f")"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X PUT "${DATABRICKS_HOST}/api/2.0/fs/files${DEST}?overwrite=true" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f")
+            echo "Upload $f -> $DEST: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
+              echo "::error::Dataset upload failed for $f with HTTP $HTTP_CODE"
+              exit 1
+            fi
+          done
 
       - name: Upload JAR to UC Volume
         working-directory: ./SynopsisLake
@@ -139,6 +172,7 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           JAR_VOLUME_PATH: ${{ env.JAR_VOLUME_PATH }}
           DATASET_PATH: ${{ env.DATASET_PATH }}
+          OUTPUT_VOLUME_DIR: ${{ env.OUTPUT_VOLUME_DIR }}
           SYNOPSIS_FOLDER: ${{ env.SYNOPSIS_FOLDER }}
           SYNOPSIS_TYPE: ${{ env.SYNOPSIS_TYPE }}
           SYNOPSIS_RESOLUTION: ${{ env.SYNOPSIS_RESOLUTION }}
@@ -154,6 +188,7 @@ jobs:
             --arg name "$JOB_NAME" \
             --arg jar_path "$JAR_VOLUME_PATH" \
             --arg dataset_path "$DATASET_PATH" \
+            --arg output_uri "file://$OUTPUT_VOLUME_DIR" \
             --arg synopsis_folder "$SYNOPSIS_FOLDER" \
             --arg synopsis_type "$SYNOPSIS_TYPE" \
             --arg synopsis_resolution "$SYNOPSIS_RESOLUTION" \
@@ -188,7 +223,7 @@ jobs:
                 spark_jar_task: {
                   main_class_name: "SynopsisLake.SynopsisOverheadExp",
                   parameters: [
-                    "-HDFSURI", "file:///Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars",
+                    "-HDFSURI", $output_uri,
                     "-datasetPath", $dataset_path,
                     "-synopsisFolder", $synopsis_folder,
                     "-synopsisType", $synopsis_type,
