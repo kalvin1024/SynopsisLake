@@ -8,7 +8,7 @@ on:
 env:
   # Set your Databricks host (workspace URL) here if you prefer (or keep as is)
   DATABRICKS_HOST: https://dbc-702a0a68-ef83.cloud.databricks.com
-  DBFS_TARGET: dbfs:/FileStore/jars/synopsislake.jar
+  JAR_VOLUME_PATH: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar
   # Default dataset path (change to your Repos path or DBFS path)
   DATASET_PATH: "/Workspace/Shared/SynopsisLake/SynopsisLake/pyspark-migration/spatial_join/0.csv"
   # Default parameters passed to the Java main (edit if you want other defaults)
@@ -69,7 +69,28 @@ jobs:
             exit 1
           fi
 
-      - name: Upload JAR to Databricks DBFS
+      - name: Ensure UC schema and volume exist
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Creating schema synopsis_lake if it does not exist..."
+          SC_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/schemas" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"catalog_name":"cs598_ccc_research_7474657373242960","name":"synopsis_lake"}')
+          echo "Create schema HTTP status: $SC_CODE (409=already exists, 200=created)"
+
+          echo "Creating volume jars if it does not exist..."
+          VL_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/volumes" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"catalog_name":"cs598_ccc_research_7474657373242960","schema_name":"synopsis_lake","name":"jars","volume_type":"MANAGED"}')
+          echo "Create volume HTTP status: $VL_CODE (409=already exists, 200=created)"
+
+      - name: Upload JAR to UC Volume
         working-directory: ./SynopsisLake
         env:
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
@@ -77,15 +98,15 @@ jobs:
         run: |
           JAR=$(ls target/*SNAPSHOT.jar | head -n 1)
           echo "Found JAR: $JAR"
-          databricks fs cp "$JAR" "${{ env.DBFS_TARGET }}" --overwrite
-          echo "Uploaded to ${DBFS_TARGET}"
+          databricks fs cp "$JAR" "${{ env.JAR_VOLUME_PATH }}" --overwrite
+          echo "Uploaded to ${{ env.JAR_VOLUME_PATH }}"
 
       - name: Ensure Databricks Job exists (find by name or create)
         id: ensure-job
         env:
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-          DBFS_TARGET: ${{ env.DBFS_TARGET }}
+          JAR_VOLUME_PATH: ${{ env.JAR_VOLUME_PATH }}
           DATASET_PATH: ${{ env.DATASET_PATH }}
           SYNOPSIS_FOLDER: ${{ env.SYNOPSIS_FOLDER }}
           SYNOPSIS_TYPE: ${{ env.SYNOPSIS_TYPE }}
@@ -129,7 +150,7 @@ jobs:
           jq -n \
             --arg name "$JOB_NAME" \
             --arg cluster_id "$CLUSTER_ID" \
-            --arg dbfs_target "$DBFS_TARGET" \
+            --arg jar_path "$JAR_VOLUME_PATH" \
             --arg dataset_path "$DATASET_PATH" \
             --arg synopsis_folder "$SYNOPSIS_FOLDER" \
             --arg synopsis_type "$SYNOPSIS_TYPE" \
@@ -142,11 +163,11 @@ jobs:
               tasks: [{
                 task_key: "synopsis_jar",
                 existing_cluster_id: $cluster_id,
-                libraries: [{ jar: $dbfs_target }],
+                libraries: [{ jar: $jar_path }],
                 spark_jar_task: {
                   main_class_name: "SynopsisLake.SynopsisOverheadExp",
                   parameters: [
-                    "-HDFSURI", "file:///dbfs/tmp/synout",
+                    "-HDFSURI", "file:///Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars",
                     "-datasetPath", $dataset_path,
                     "-synopsisFolder", $synopsis_folder,
                     "-synopsisType", $synopsis_type,
