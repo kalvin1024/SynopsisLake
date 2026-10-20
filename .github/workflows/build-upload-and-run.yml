@@ -46,12 +46,28 @@ jobs:
         working-directory: ./SynopsisLake
         run: mvn -B -DskipTests package
 
-      - name: Install databricks-cli and jq
+      - name: Install Databricks CLI and jq
         run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade databricks-cli
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
           sudo apt-get update -y
           sudo apt-get install -y jq
+
+      - name: Verify Databricks auth
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Host: $DATABRICKS_HOST"
+          echo "Token length: ${#DATABRICKS_TOKEN}"
+          echo "Token prefix: ${DATABRICKS_TOKEN:0:5}..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            "${DATABRICKS_HOST}/api/2.0/clusters/list")
+          echo "Auth test HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Auth check returned HTTP $HTTP_CODE. Check token, host, and IP access lists."
+            exit 1
+          fi
 
       - name: Upload JAR to Databricks DBFS
         working-directory: ./SynopsisLake
@@ -61,8 +77,6 @@ jobs:
         run: |
           JAR=$(ls target/*SNAPSHOT.jar | head -n 1)
           echo "Found JAR: $JAR"
-          export DATABRICKS_HOST=${DATABRICKS_HOST}
-          export DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
           databricks fs cp "$JAR" "${{ env.DBFS_TARGET }}" --overwrite
           echo "Uploaded to ${DBFS_TARGET}"
 
