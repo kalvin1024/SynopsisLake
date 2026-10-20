@@ -75,20 +75,35 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           echo "Creating schema synopsis_lake if it does not exist..."
-          SC_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          SC_BODY=$(curl -s -w "\n%{http_code}" \
             -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/schemas" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"catalog_name":"cs598_ccc_research_7474657373242960","name":"synopsis_lake"}')
-          echo "Create schema HTTP status: $SC_CODE (409=already exists, 200=created)"
+          SC_CODE=$(echo "$SC_BODY" | tail -n1)
+          SC_RESP=$(echo "$SC_BODY" | sed '$d')
+          echo "Create schema HTTP $SC_CODE: $SC_RESP"
+          if [ "$SC_CODE" != "200" ] && [ "$SC_CODE" != "409" ]; then
+            echo "::error::Failed to create schema. HTTP $SC_CODE"
+            exit 1
+          fi
 
           echo "Creating volume jars if it does not exist..."
-          VL_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          VL_BODY=$(curl -s -w "\n%{http_code}" \
             -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/volumes" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"catalog_name":"cs598_ccc_research_7474657373242960","schema_name":"synopsis_lake","name":"jars","volume_type":"MANAGED"}')
-          echo "Create volume HTTP status: $VL_CODE (409=already exists, 200=created)"
+          VL_CODE=$(echo "$VL_BODY" | tail -n1)
+          VL_RESP=$(echo "$VL_BODY" | sed '$d')
+          echo "Create volume HTTP $VL_CODE: $VL_RESP"
+          if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ]; then
+            echo "::error::Failed to create volume. HTTP $VL_CODE"
+            exit 1
+          fi
+
+          echo "Verifying volume is accessible..."
+          databricks fs ls /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/ || echo "Warning: volume listing failed"
 
       - name: Upload JAR to UC Volume
         working-directory: ./SynopsisLake
