@@ -83,8 +83,13 @@ jobs:
           SC_CODE=$(echo "$SC_BODY" | tail -n1)
           SC_RESP=$(echo "$SC_BODY" | sed '$d')
           echo "Create schema HTTP $SC_CODE: $SC_RESP"
-          if [ "$SC_CODE" != "200" ] && [ "$SC_CODE" != "409" ]; then
+          if [ "$SC_CODE" != "200" ] && [ "$SC_CODE" != "409" ] && [ "$SC_CODE" != "400" ]; then
             echo "::error::Failed to create schema. HTTP $SC_CODE"
+            exit 1
+          fi
+          # 400 with ALREADY_EXISTS is fine; fail on other 400 errors
+          if [ "$SC_CODE" = "400" ] && ! echo "$SC_RESP" | grep -q "ALREADY_EXISTS"; then
+            echo "::error::Schema creation failed with unexpected 400 error."
             exit 1
           fi
 
@@ -97,8 +102,12 @@ jobs:
           VL_CODE=$(echo "$VL_BODY" | tail -n1)
           VL_RESP=$(echo "$VL_BODY" | sed '$d')
           echo "Create volume HTTP $VL_CODE: $VL_RESP"
-          if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ]; then
+          if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ] && [ "$VL_CODE" != "400" ]; then
             echo "::error::Failed to create volume. HTTP $VL_CODE"
+            exit 1
+          fi
+          if [ "$VL_CODE" = "400" ] && ! echo "$VL_RESP" | grep -q "ALREADY_EXISTS"; then
+            echo "::error::Volume creation failed with unexpected 400 error."
             exit 1
           fi
 
