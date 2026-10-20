@@ -111,9 +111,6 @@ jobs:
             exit 1
           fi
 
-          echo "Verifying volume is accessible..."
-          databricks fs ls /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/ || echo "Warning: volume listing failed"
-
       - name: Upload JAR to UC Volume
         working-directory: ./SynopsisLake
         env:
@@ -122,7 +119,17 @@ jobs:
         run: |
           JAR=$(ls target/*SNAPSHOT.jar | head -n 1)
           echo "Found JAR: $JAR"
-          databricks fs cp "$JAR" "${{ env.JAR_VOLUME_PATH }}" --overwrite
+          # Upload via Files API (works reliably with UC Volumes)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PUT "${DATABRICKS_HOST}/api/2.0/fs/files/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$JAR")
+          echo "Upload HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
+            echo "::error::JAR upload failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
           echo "Uploaded to ${{ env.JAR_VOLUME_PATH }}"
 
       - name: Ensure Databricks Job exists (find by name or create)
