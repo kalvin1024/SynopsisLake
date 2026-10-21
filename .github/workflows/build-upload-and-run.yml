@@ -1,0 +1,372 @@
+name: Build JAR, upload to DBFS and trigger Databricks run
+
+on:
+  push:
+    branches: [ "pyspark-migration", "main" ]
+    # Only build and run the Databricks job when the JAR source, its input data,
+    # or this workflow changes. Edits elsewhere (e.g. experiments/ notebooks) skip CI.
+    paths:
+      - "SynopsisLake/**"
+      - "spatial_join/**"
+      - ".github/workflows/build-upload-and-run.yml"
+  # Manual runs from the GitHub Actions tab are always allowed
+  workflow_dispatch:
+
+env:
+  # Set your Databricks host (workspace URL) here if you prefer (or keep as is)
+  DATABRICKS_HOST: https://dbc-702a0a68-ef83.cloud.databricks.com
+  JAR_VOLUME_PATH: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar
+  # UC volumes: jars = build artifacts, data = input datasets, output = job results
+  DATA_VOLUME_DIR: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data
+  OUTPUT_VOLUME_DIR: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/output
+  # Local repo folder whose CSVs are uploaded to DATA_VOLUME_DIR/spatial_join
+  LOCAL_DATA_DIR: spatial_join
+  # Dataset path read by the JAR (must be in a UC volume; /Workspace is not readable from java.io)
+  DATASET_PATH: "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data/spatial_join/0.csv"
+  # Default parameters passed to the Java main (edit if you want other defaults)
+  SYNOPSIS_FOLDER: "synout"
+  SYNOPSIS_TYPE: "4"
+  SYNOPSIS_RESOLUTION: "128"
+  NUM_FILE: "5"
+  NUM_RECORDS: "10000"
+  WRITE_DATA_FILE_INT: "0"
+  # Polling timeout (minutes)
+  MAX_WAIT_MINUTES: "30"
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
+
+      - name: Build with Maven (skip tests)
+        working-directory: ./SynopsisLake
+        run: mvn -B -DskipTests package
+
+      - name: Install Databricks CLI and jq
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Verify Databricks auth
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Host: $DATABRICKS_HOST"
+          echo "Token length: ${#DATABRICKS_TOKEN}"
+          echo "Token prefix: ${DATABRICKS_TOKEN:0:5}..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            "${DATABRICKS_HOST}/api/2.0/clusters/list")
+          echo "Auth test HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Auth check returned HTTP $HTTP_CODE. Check token, host, and IP access lists."
+            exit 1
+          fi
+
+      - name: Ensure UC schema and volumes exist
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Creating schema synopsis_lake if it does not exist..."
+          SC_BODY=$(curl -s -w "\n%{http_code}" \
+            -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/schemas" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"catalog_name":"cs598_ccc_research_7474657373242960","name":"synopsis_lake"}')
+          SC_CODE=$(echo "$SC_BODY" | tail -n1)
+          SC_RESP=$(echo "$SC_BODY" | sed '$d')
+          echo "Create schema HTTP $SC_CODE: $SC_RESP"
+          if [ "$SC_CODE" != "200" ] && [ "$SC_CODE" != "409" ] && [ "$SC_CODE" != "400" ]; then
+            echo "::error::Failed to create schema. HTTP $SC_CODE"
+            exit 1
+          fi
+          # 400 with ALREADY_EXISTS is fine; fail on other 400 errors
+          if [ "$SC_CODE" = "400" ] && ! echo "$SC_RESP" | grep -q "ALREADY_EXISTS"; then
+            echo "::error::Schema creation failed with unexpected 400 error."
+            exit 1
+          fi
+
+          for VOL in jars data output; do
+            echo "Creating volume $VOL if it does not exist..."
+            VL_BODY=$(curl -s -w "\n%{http_code}" \
+              -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/volumes" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"catalog_name\":\"cs598_ccc_research_7474657373242960\",\"schema_name\":\"synopsis_lake\",\"name\":\"${VOL}\",\"volume_type\":\"MANAGED\"}")
+            VL_CODE=$(echo "$VL_BODY" | tail -n1)
+            VL_RESP=$(echo "$VL_BODY" | sed '$d')
+            echo "Create volume $VOL HTTP $VL_CODE: $VL_RESP"
+            if [ "$VL_CODE" != "200" ] && [ "$VL_CODE" != "409" ] && [ "$VL_CODE" != "400" ]; then
+              echo "::error::Failed to create volume $VOL. HTTP $VL_CODE"
+              exit 1
+            fi
+            if [ "$VL_CODE" = "400" ] && ! echo "$VL_RESP" | grep -q "ALREADY_EXISTS"; then
+              echo "::error::Volume $VOL creation failed with unexpected 400 error."
+              exit 1
+            fi
+          done
+
+      - name: Upload input datasets to data volume
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATA_VOLUME_DIR: ${{ env.DATA_VOLUME_DIR }}
+          LOCAL_DATA_DIR: ${{ env.LOCAL_DATA_DIR }}
+        run: |
+          if [ ! -d "$LOCAL_DATA_DIR" ]; then
+            echo "::warning::Local data folder '$LOCAL_DATA_DIR' not found in repo; skipping dataset upload."
+            exit 0
+          fi
+          for f in "$LOCAL_DATA_DIR"/*.csv; do
+            [ -e "$f" ] || continue
+            DEST="${DATA_VOLUME_DIR}/spatial_join/$(basename "$f")"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X PUT "${DATABRICKS_HOST}/api/2.0/fs/files${DEST}?overwrite=true" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f")
+            echo "Upload $f -> $DEST: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
+              echo "::error::Dataset upload failed for $f with HTTP $HTTP_CODE"
+              exit 1
+            fi
+          done
+
+      - name: Upload JAR to UC Volume
+        working-directory: ./SynopsisLake
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          JAR=$(ls target/*SNAPSHOT.jar | head -n 1)
+          echo "Found JAR: $JAR"
+          # Upload via Files API (works reliably with UC Volumes)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PUT "${DATABRICKS_HOST}/api/2.0/fs/files/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$JAR")
+          echo "Upload HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
+            echo "::error::JAR upload failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+          echo "Uploaded to ${{ env.JAR_VOLUME_PATH }}"
+
+      - name: Create or update Databricks Job (applies cluster definition every run)
+        id: ensure-job
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          JAR_VOLUME_PATH: ${{ env.JAR_VOLUME_PATH }}
+          DATASET_PATH: ${{ env.DATASET_PATH }}
+          OUTPUT_VOLUME_DIR: ${{ env.OUTPUT_VOLUME_DIR }}
+          SYNOPSIS_FOLDER: ${{ env.SYNOPSIS_FOLDER }}
+          SYNOPSIS_TYPE: ${{ env.SYNOPSIS_TYPE }}
+          SYNOPSIS_RESOLUTION: ${{ env.SYNOPSIS_RESOLUTION }}
+          NUM_FILE: ${{ env.NUM_FILE }}
+          NUM_RECORDS: ${{ env.NUM_RECORDS }}
+          WRITE_DATA_FILE_INT: ${{ env.WRITE_DATA_FILE_INT }}
+        run: |
+          JOB_NAME="SynopsisLake - CI JAR Run"
+
+          # Build the job settings once. They are used for both create and update,
+          # so the cluster/task definition in this file is always applied to the job.
+          jq -n \
+            --arg name "$JOB_NAME" \
+            --arg jar_path "$JAR_VOLUME_PATH" \
+            --arg dataset_path "$DATASET_PATH" \
+            --arg output_uri "file://$OUTPUT_VOLUME_DIR" \
+            --arg synopsis_folder "$SYNOPSIS_FOLDER" \
+            --arg synopsis_type "$SYNOPSIS_TYPE" \
+            --arg synopsis_resolution "$SYNOPSIS_RESOLUTION" \
+            --arg num_file "$NUM_FILE" \
+            --arg num_records "$NUM_RECORDS" \
+            --arg write_data_file_int "$WRITE_DATA_FILE_INT" \
+            '{
+              name: $name,
+              tasks: [{
+                task_key: "synopsis_jar",
+                new_cluster: {
+                  spark_version: "14.3.x-scala2.12",
+                  node_type_id: "i3.xlarge",
+                  num_workers: 2,
+                  data_security_mode: "SINGLE_USER",
+                  enable_elastic_disk: true,
+                  spark_conf: {
+                    "spark.executor.memory": "16g",
+                    "spark.memory.offHeap.enabled": "true",
+                    "spark.memory.offHeap.size": "3g",
+                    "spark.rpc.message.maxSize": "1024"
+                  },
+                  aws_attributes: {
+                    availability: "SPOT_WITH_FALLBACK",
+                    first_on_demand: 1,
+                    zone_id: "auto",
+                    spot_bid_price_percent: 100
+                  },
+                  policy_id: "000A3B1024C72B42"
+                },
+                libraries: [{ jar: $jar_path }],
+                spark_jar_task: {
+                  main_class_name: "SynopsisLake.SynopsisOverheadExp",
+                  parameters: [
+                    "-HDFSURI", $output_uri,
+                    "-datasetPath", $dataset_path,
+                    "-synopsisFolder", $synopsis_folder,
+                    "-synopsisType", $synopsis_type,
+                    "-synopsisResolution", $synopsis_resolution,
+                    "-numFile", $num_file,
+                    "-numOfRecordPerFile", $num_records,
+                    "-writeDataFileInt", $write_data_file_int
+                  ]
+                }
+              }]
+            }' > job-settings.json
+
+          # Resolve the job id: DATABRICKS_JOB_ID secret first, then lookup by name
+          JOB_ID="${{ secrets.DATABRICKS_JOB_ID }}"
+          if [ -n "$JOB_ID" ]; then
+            echo "Using job id from DATABRICKS_JOB_ID secret: $JOB_ID"
+          else
+            echo "Searching for job '$JOB_NAME'..."
+            ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$JOB_NAME'))")
+            JOBS=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/list?name=${ENCODED_NAME}" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
+            JOB_ID=$(echo "$JOBS" | jq -r '.jobs[0].job_id // empty')
+          fi
+
+          if [ -n "$JOB_ID" ]; then
+            # Existing job: push the current cluster/task definition.
+            # jobs/update replaces the listed top-level fields; tasks are matched by task_key.
+            echo "Updating existing job '$JOB_NAME' ($JOB_ID) with current cluster definition..."
+            jq --argjson id "$JOB_ID" '{job_id: $id, new_settings: .}' job-settings.json > job-update-payload.json
+            UP_BODY=$(curl -s -w "\n%{http_code}" -X POST "${DATABRICKS_HOST}/api/2.1/jobs/update" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @job-update-payload.json)
+            UP_CODE=$(echo "$UP_BODY" | tail -n1)
+            UP_RESP=$(echo "$UP_BODY" | sed '$d')
+            echo "Update job HTTP $UP_CODE: $UP_RESP"
+            if [ "$UP_CODE" != "200" ]; then
+              echo "::error::Failed to update job $JOB_ID. HTTP $UP_CODE"
+              exit 1
+            fi
+            echo "Updated job '$JOB_NAME' with id: $JOB_ID"
+          else
+            # No job yet: create it with the same settings
+            echo "No existing job found. Creating '$JOB_NAME'..."
+            RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/create" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @job-settings.json)
+            echo "Response: $RESPONSE"
+            JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
+            if [ -z "$JOB_ID" ]; then
+              echo "::error::Failed to create job. Full response: $RESPONSE"
+              exit 1
+            fi
+            echo "Created job '$JOB_NAME' with id: $JOB_ID"
+          fi
+
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Databricks Job (run-now)
+        if: ${{ steps.ensure-job.outputs.job_id != '' }}
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          JOB_ID=${{ steps.ensure-job.outputs.job_id }}
+          echo "Triggering run-now for job id: $JOB_ID"
+          RESPONSE=$(curl -s -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\":$JOB_ID}")
+          echo "Response: $RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | jq -r '.run_id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "Failed to obtain run_id from jobs/run-now response."
+            echo "Full response: $RESPONSE"
+            exit 1
+          fi
+          echo "Run ID: $RUN_ID"
+          echo "$RUN_ID" > run_id.txt
+
+      - name: Poll Databricks run status and fail CI on non-success
+        if: always()
+        env:
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MAX_WAIT_MINUTES: ${{ env.MAX_WAIT_MINUTES }}
+        run: |
+          # Only run if run_id.txt exists (i.e., a run was submitted)
+          if [ ! -f run_id.txt ]; then
+            echo "No run_id.txt found; no Databricks run was triggered. Skipping status poll."
+            exit 0
+          fi
+
+          RUN_ID=$(cat run_id.txt)
+          echo "Polling Databricks run_id: $RUN_ID"
+          START_TS=$(date +%s)
+          MAX_WAIT_SECONDS=$(( MAX_WAIT_MINUTES * 60 ))
+          INTERVAL=15
+
+          while true; do
+            RESPONSE=$(curl -s -X GET "${DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}")
+            echo "Status response: $RESPONSE"
+            LIFE_CYCLE_STATE=$(echo "$RESPONSE" | jq -r '.state.life_cycle_state // empty')
+            RESULT_STATE=$(echo "$RESPONSE" | jq -r '.state.result_state // empty')
+            RUN_PAGE_URL=$(echo "$RESPONSE" | jq -r '.run_page_url // empty')
+
+            echo "life_cycle_state: $LIFE_CYCLE_STATE"
+            echo "result_state: $RESULT_STATE"
+            echo "run_page_url: $RUN_PAGE_URL"
+
+            if [ "$LIFE_CYCLE_STATE" = "TERMINATED" ] || [ "$LIFE_CYCLE_STATE" = "SKIPPED" ] || [ "$LIFE_CYCLE_STATE" = "INTERNAL_ERROR" ]; then
+              echo "Run completed with life_cycle_state=$LIFE_CYCLE_STATE and result_state=$RESULT_STATE"
+              if [ "$RESULT_STATE" = "SUCCESS" ]; then
+                echo "Databricks run succeeded (run_id=$RUN_ID)."
+                exit 0
+              else
+                echo "Databricks run failed (run_id=$RUN_ID). Fetching run diagnostics..."
+                echo "Run page URL: $RUN_PAGE_URL"
+                # Print brief summary and exit non-zero to fail the workflow
+                echo "Full state JSON:"
+                echo "$RESPONSE" | jq '.state'
+                exit 1
+              fi
+            fi
+
+            # check timeout
+            NOW_TS=$(date +%s)
+            ELAPSED=$(( NOW_TS - START_TS ))
+            if [ $ELAPSED -ge $MAX_WAIT_SECONDS ]; then
+              echo "Polling timed out after ${MAX_WAIT_MINUTES} minutes. Last response:"
+              echo "$RESPONSE" | jq '.state'
+              exit 1
+            fi
+
+            echo "Run still in progress (life_cycle_state=$LIFE_CYCLE_STATE). Sleeping ${INTERVAL}s..."
+            sleep $INTERVAL
+          done
