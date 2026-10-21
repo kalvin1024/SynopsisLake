@@ -30,7 +30,7 @@ public class SynopsisOverheadExp {
 	int numOfRecordPerFile = 1000000;
 //	int numFile = 10;
 //	int numOfRecordPerFile = 30000;
-	String regex = "\t";
+	String regex = ";"; //CSV uses ; delimiter, doesn't know why this version is /t
 
 	String HDFSURI = "";
 
