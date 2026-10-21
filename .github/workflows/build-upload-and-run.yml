@@ -3,6 +3,13 @@ name: Build JAR, upload to DBFS and trigger Databricks run
 on:
   push:
     branches: [ "pyspark-migration", "main" ]
+    # Only build and run the Databricks job when the JAR source, its input data,
+    # or this workflow changes. Edits elsewhere (e.g. experiments/ notebooks) skip CI.
+    paths:
+      - "SynopsisLake/**"
+      - "spatial_join/**"
+      - ".github/workflows/build-upload-and-run.yml"
+  # Manual runs from the GitHub Actions tab are always allowed
   workflow_dispatch:
 
 env:
