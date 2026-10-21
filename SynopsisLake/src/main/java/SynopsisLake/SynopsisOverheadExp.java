@@ -124,7 +124,7 @@ public class SynopsisOverheadExp {
 		switch (synopsisType) {
 		case -1:
 			Dataset<Row> df = spark.sqlContext().createDataFrame(list, ParquetRow.class);
-			df.coalesce(1).write().parquet(parquetFilePath);
+			df.coalesce(1).write().mode("overwrite").parquet(parquetFilePath);
 //			df.write().parquet(parquetFilePath);
 			break;
 		case 0:
@@ -133,25 +133,25 @@ public class SynopsisOverheadExp {
 		case 1:
 			// 2D Count histogram
 			Dataset<Row> histDF = spark.sqlContext().createDataFrame(list, ParquetRow2DCountHistogram.class);
-			histDF.coalesce(1).write().parquet(parquetFilePath);
+			histDF.coalesce(1).write().mode("overwrite").parquet(parquetFilePath);
 //			histDF.write().parquet(parquetFilePath);
 			break;
 		case 3:
 			// 2D Wavelet
 			Dataset<Row> waveletDF = spark.sqlContext().createDataFrame(list, ParquetRow2DWavelets.class);
 //			waveletDF.write().parquet(parquetFilePath);
-			waveletDF.coalesce(1).write().parquet(parquetFilePath);
+			waveletDF.coalesce(1).write().mode("overwrite").parquet(parquetFilePath);
 			break;
 		case 4:
 			// Geometric Histogram
 			Dataset<Row> geohistDF = spark.sqlContext().createDataFrame(list, ParquetRowGeometricHistogram.class);
 //			geohistDF.write().parquet(parquetFilePath);
-			geohistDF.coalesce(1).write().parquet(parquetFilePath);
+			geohistDF.coalesce(1).write().mode("overwrite").parquet(parquetFilePath);
 			break;
 		case 6:
 			// Uniform Samples
 			Dataset<Row> usDF = spark.sqlContext().createDataFrame(list, ParquetRowUniformSamples.class);
-			usDF.coalesce(1).write().parquet(parquetFilePath);
+			usDF.coalesce(1).write().mode("overwrite").parquet(parquetFilePath);
 			break;
 		}
 
