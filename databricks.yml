@@ -1,0 +1,216 @@
+# Declarative Automation Bundle for SynopsisLake.
+# Single source of truth for the SynopsisOverheadExp job (cluster + one task per synopsis type).
+# The GitHub Actions workflow builds/uploads the JAR, then runs:
+#   databricks bundle deploy -t ci   and   databricks bundle run -t ci synopsis_overhead_exp
+# Override any variable from the CLI, e.g. --var="num_file=50" --var="num_records=1000000"
+
+bundle:
+  name: synopsis_lake
+
+# Only the job definition is deployed; keep large/source folders out of the workspace sync
+sync:
+  exclude:
+    - "SynopsisLake/**"
+    - "spatial_join/**"
+    - "experiments/**"
+    - ".github/**"
+    - "job-create.json"
+
+variables:
+  jar_path:
+    description: JAR uploaded by CI
+    default: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/jars/synopsislake.jar
+  dataset_path:
+    description: Input CSV read by the JAR (must be in a UC volume)
+    default: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data/spatial_join/0.csv
+  output_uri:
+    description: -HDFSURI passed to the JAR (results volume)
+    default: file:///Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/output
+  synopsis_folder:
+    description: Base output folder; each task writes to <synopsis_folder>_<task_key>
+    default: synout
+  synopsis_resolution:
+    default: "128"
+  num_file:
+    description: Small scale for now (scale up later)
+    default: "5"
+  num_records:
+    description: Records per file
+    default: "10000"
+  write_data_file_int:
+    default: "0"
+
+resources:
+  jobs:
+    synopsis_overhead_exp:
+      name: SynopsisLake - Synopsis Overhead Exp
+      max_concurrent_runs: 1
+
+      job_clusters:
+        - job_cluster_key: synopsis_cluster
+          new_cluster:
+            spark_version: 14.3.x-scala2.12
+            node_type_id: i3.xlarge
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+            enable_elastic_disk: true
+            policy_id: "000A3B1024C72B42"
+            spark_conf:
+              spark.executor.memory: 16g
+              spark.memory.offHeap.enabled: "true"
+              spark.memory.offHeap.size: 3g
+              spark.rpc.message.maxSize: "1024"
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+              zone_id: auto
+              spot_bid_price_percent: 100
+
+      # One task per synopsis type handled by SynopsisOverheadExp.
+      # Tasks share one job cluster and run sequentially; run_if ALL_DONE so a
+      # failing type does not skip the remaining ones. (Type 0 is a no-op in the code.)
+      tasks:
+        - task_key: no_synopsis
+          description: SynopsisOverheadExp with -synopsisType -1 (no synopsis)
+          job_cluster_key: synopsis_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: SynopsisLake.SynopsisOverheadExp
+            parameters:
+              - -HDFSURI
+              - ${var.output_uri}
+              - -datasetPath
+              - ${var.dataset_path}
+              - -synopsisFolder
+              - ${var.synopsis_folder}_no_synopsis
+              - -synopsisType
+              - "-1"
+              - -synopsisResolution
+              - ${var.synopsis_resolution}
+              - -numFile
+              - ${var.num_file}
+              - -numOfRecordPerFile
+              - ${var.num_records}
+              - -writeDataFileInt
+              - ${var.write_data_file_int}
+
+        - task_key: count_hist_2d
+          description: SynopsisOverheadExp with -synopsisType 1 (2D count histogram)
+          depends_on:
+            - task_key: no_synopsis
+          run_if: ALL_DONE
+          job_cluster_key: synopsis_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: SynopsisLake.SynopsisOverheadExp
+            parameters:
+              - -HDFSURI
+              - ${var.output_uri}
+              - -datasetPath
+              - ${var.dataset_path}
+              - -synopsisFolder
+              - ${var.synopsis_folder}_count_hist_2d
+              - -synopsisType
+              - "1"
+              - -synopsisResolution
+              - ${var.synopsis_resolution}
+              - -numFile
+              - ${var.num_file}
+              - -numOfRecordPerFile
+              - ${var.num_records}
+              - -writeDataFileInt
+              - ${var.write_data_file_int}
+
+        - task_key: wavelet_2d
+          description: SynopsisOverheadExp with -synopsisType 3 (2D wavelet)
+          depends_on:
+            - task_key: count_hist_2d
+          run_if: ALL_DONE
+          job_cluster_key: synopsis_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: SynopsisLake.SynopsisOverheadExp
+            parameters:
+              - -HDFSURI
+              - ${var.output_uri}
+              - -datasetPath
+              - ${var.dataset_path}
+              - -synopsisFolder
+              - ${var.synopsis_folder}_wavelet_2d
+              - -synopsisType
+              - "3"
+              - -synopsisResolution
+              - ${var.synopsis_resolution}
+              - -numFile
+              - ${var.num_file}
+              - -numOfRecordPerFile
+              - ${var.num_records}
+              - -writeDataFileInt
+              - ${var.write_data_file_int}
+
+        - task_key: geometric_hist
+          description: SynopsisOverheadExp with -synopsisType 4 (geometric histogram)
+          depends_on:
+            - task_key: wavelet_2d
+          run_if: ALL_DONE
+          job_cluster_key: synopsis_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: SynopsisLake.SynopsisOverheadExp
+            parameters:
+              - -HDFSURI
+              - ${var.output_uri}
+              - -datasetPath
+              - ${var.dataset_path}
+              - -synopsisFolder
+              - ${var.synopsis_folder}_geometric_hist
+              - -synopsisType
+              - "4"
+              - -synopsisResolution
+              - ${var.synopsis_resolution}
+              - -numFile
+              - ${var.num_file}
+              - -numOfRecordPerFile
+              - ${var.num_records}
+              - -writeDataFileInt
+              - ${var.write_data_file_int}
+
+        - task_key: uniform_samples
+          description: SynopsisOverheadExp with -synopsisType 6 (uniform samples)
+          depends_on:
+            - task_key: geometric_hist
+          run_if: ALL_DONE
+          job_cluster_key: synopsis_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: SynopsisLake.SynopsisOverheadExp
+            parameters:
+              - -HDFSURI
+              - ${var.output_uri}
+              - -datasetPath
+              - ${var.dataset_path}
+              - -synopsisFolder
+              - ${var.synopsis_folder}_uniform_samples
+              - -synopsisType
+              - "6"
+              - -synopsisResolution
+              - ${var.synopsis_resolution}
+              - -numFile
+              - ${var.num_file}
+              - -numOfRecordPerFile
+              - ${var.num_records}
+              - -writeDataFileInt
+              - ${var.write_data_file_int}
+
+targets:
+  ci:
+    default: true
+    workspace:
+      host: https://dbc-702a0a68-ef83.cloud.databricks.com
+      # Keep bundle state outside the git folder
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
