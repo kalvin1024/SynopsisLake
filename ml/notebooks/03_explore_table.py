@@ -28,7 +28,8 @@ def _ml_dir():
     """Folder that holds features.py (this notebook is …/ml/notebooks/03_explore_table)."""
     try:
         nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
-        return "/Workspace" + nb.split("/ml/notebooks/")[0] + "/ml"
+        root = nb.split("/ml/notebooks/")[0]
+        return (root if root.startswith("/Workspace/") else "/Workspace" + root) + "/ml"
     except Exception:
         return os.path.join(os.getcwd(), "ml")
 

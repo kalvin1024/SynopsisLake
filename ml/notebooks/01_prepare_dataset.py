@@ -25,7 +25,8 @@ def _repo_root():
     """Folder that holds ml/ (this notebook is …/ml/notebooks/01_prepare_dataset)."""
     try:
         nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
-        return "/Workspace" + nb.split("/ml/notebooks/")[0]
+        root = nb.split("/ml/notebooks/")[0]
+        return root if root.startswith("/Workspace/") else "/Workspace" + root
     except Exception:
         try:
             return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
