@@ -1,11 +1,15 @@
 # Declarative Automation Bundle for SynopsisLake.
-# Single source of truth for the SynopsisOverheadExp job (cluster + one task per synopsis type).
+# Single source of truth for the SynopsisOverheadExp job (cluster + one task per synopsis type) and,
+# via resources/*.yml, the ml_xy_pipeline job (resources/ml_xy.job.yml).
 # The GitHub Actions workflow builds/uploads the JAR, then runs:
-#   databricks bundle deploy -t ci   and   databricks bundle run -t ci synopsis_overhead_exp
+#   databricks bundle deploy -t ci   and   databricks bundle run -t ci <job key> (default ml_xy_pipeline)
 # Override any variable from the CLI, e.g. --var="num_file=50" --var="num_records=1000000"
 
 bundle:
   name: synopsis_lake
+
+include:
+  - resources/*.yml
 
 # Only the job definition is deployed; keep large/source folders out of the workspace sync
 sync:
@@ -13,6 +17,7 @@ sync:
     - "SynopsisLake/**"
     - "spatial_join/**"
     - "experiments/**"
+    - "range_query/**"   # ~400 MB of CSVs; CI uploads them to the data volume instead
     - ".github/**"
     - "job-create.json"
 
@@ -39,6 +44,18 @@ variables:
     default: "10000"
   write_data_file_int:
     default: "0"
+  ml_volume:
+    description: Volume root for the ML pipeline (data/range_query, data/ml, output/ml, jars)
+    default: /Volumes/cs598_ccc_research_7474657373242960/synopsis_lake
+  ml_dataset:
+    description: Dataset folder name under data/ml and output/ml
+    default: authors_range
+  ml_reproduce_authors:
+    description: ErrorPredictionLogExp -reproduceAuthors (reload sources per merge rate, matches the paper's averages)
+    default: "false"
+  ml_fix_stride:
+    description: ErrorPredictionLogExp -fixStride (correct row stride in the beta computation)
+    default: "false"
 
 resources:
   jobs:

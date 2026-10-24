@@ -1,0 +1,111 @@
+# ML error-predictor pipeline: per-query X-y table for merged count histograms (formats: ml/SCHEMA.md).
+#   prepare_dataset  notebook 01: <ml_volume>/data/ml/<ml_dataset>/queries-*
+#   run_logger       sigspatial25.ErrorPredictionLogExp: <ml_volume>/output/ml/<ml_dataset>/rows.csv, arm_*, src_*
+#   train_v0         notebook 02: MLflow runs + <ml_volume>/output/ml/<ml_dataset>/report/*.csv
+#   data_report      notebook 04: <ml_volume>/output/ml/<ml_dataset>/report/report.md (shown on the CI run summary)
+# Inputs (uploaded by CI): <ml_volume>/data/range_query/{0..3}.csv and range_query/dataDrivenQuery/...
+# Notebook paths are relative to this file.
+
+resources:
+  jobs:
+    ml_xy_pipeline:
+      name: SynopsisLake - ML X-y pipeline
+      max_concurrent_runs: 1
+
+      job_clusters:
+        - job_cluster_key: logger_cluster
+          new_cluster:
+            spark_version: 14.3.x-scala2.12
+            node_type_id: i3.xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            policy_id: "000A3B1024C72B42"
+            spark_conf:
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+              zone_id: auto
+              spot_bid_price_percent: 100
+        - job_cluster_key: ml_cluster
+          new_cluster:
+            spark_version: 14.3.x-cpu-ml-scala2.12
+            node_type_id: i3.xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            policy_id: "000A3B1024C72B42"
+            spark_conf:
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            aws_attributes:
+              availability: SPOT_WITH_FALLBACK
+              first_on_demand: 1
+              zone_id: auto
+              spot_bid_price_percent: 100
+
+      tasks:
+        - task_key: prepare_dataset
+          description: Notebook 01 - queries-Ans.txt and queries-meta.csv for the dataset
+          job_cluster_key: ml_cluster
+          notebook_task:
+            notebook_path: ../ml/notebooks/01_prepare_dataset.py
+            base_parameters:
+              volume: ${var.ml_volume}
+              dataset: ${var.ml_dataset}
+
+        - task_key: run_logger
+          description: ErrorPredictionLogExp - rows.csv and histogram exports for every merge rate
+          job_cluster_key: logger_cluster
+          libraries:
+            - jar: ${var.jar_path}
+          spark_jar_task:
+            main_class_name: sigspatial25.ErrorPredictionLogExp
+            parameters:
+              - -dataDir
+              - ${var.ml_volume}/data/range_query/
+              - -numFile
+              - "4"
+              - -srcRes
+              - "40,56,32,48"
+              - -queryFile
+              - ${var.ml_volume}/data/range_query/dataDrivenQuery/srcQuery-40-56-32-48-Ans.csv
+              - -outDir
+              - ${var.ml_volume}/output/ml/${var.ml_dataset}/
+              - -end
+              - "42"
+              - -step
+              - "8"
+              - -reproduceAuthors
+              - ${var.ml_reproduce_authors}
+              - -fixStride
+              - ${var.ml_fix_stride}
+
+        - task_key: train_v0
+          description: Notebook 02 - model v0 and gate check, report CSVs
+          depends_on:
+            - task_key: prepare_dataset
+            - task_key: run_logger
+          job_cluster_key: ml_cluster
+          notebook_task:
+            notebook_path: ../ml/notebooks/02_train_v0.py
+            base_parameters:
+              volume: ${var.ml_volume}
+              data_root: ${var.ml_volume}/data/ml
+              sample_root: ${var.ml_volume}/output/ml
+              datasets: ${var.ml_dataset}
+
+        - task_key: data_report
+          description: Notebook 04 - report.md
+          depends_on:
+            - task_key: train_v0
+          job_cluster_key: ml_cluster
+          notebook_task:
+            notebook_path: ../ml/notebooks/04_data_report.py
+            base_parameters:
+              volume: ${var.ml_volume}
+              data_root: ${var.ml_volume}/data/ml
+              sample_root: ${var.ml_volume}/output/ml
+              dataset: ${var.ml_dataset}
