@@ -21,7 +21,6 @@ resources:
             data_security_mode: SINGLE_USER
             policy_id: "000A3B1024C72B42"
             spark_conf:
-              spark.databricks.cluster.profile: singleNode
               spark.master: "local[*]"
             custom_tags:
               ResourceClass: SingleNode
@@ -38,7 +37,6 @@ resources:
             data_security_mode: SINGLE_USER
             policy_id: "000A3B1024C72B42"
             spark_conf:
-              spark.databricks.cluster.profile: singleNode
               spark.master: "local[*]"
             custom_tags:
               ResourceClass: SingleNode
