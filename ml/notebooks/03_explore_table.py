@@ -13,22 +13,37 @@
 # MAGIC * `scale` query size (1 = smallest), `mergeRate` share of the canonical resolution kept (1.0 = no reshaping loss)
 # MAGIC * every name in `features.FEATURES` is a model input, computed from the histogram and the query rectangle only
 # MAGIC
-# MAGIC Runs on the development fixture by default: look at it, don't report its numbers.
+# MAGIC Runs on the logger output (`ml_xy_pipeline` job: `output/ml/<dataset>` and `data/ml/<dataset>`) by default.
+# MAGIC Set `SAMPLE = "dev_fixture"` for the development fixture (look at it, don't report its numbers).
 
 # COMMAND ----------
 
+import os
 import sys
 
 VOL = "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake"
-ML_DIR = "/Workspace/Users/ajaykj2@illinois.edu/ml"   # folder that holds features.py
-SAMPLE = "dev_fixture"                                 # "sample" once notebook 01 has produced the real sample
-DATASET = "world"                                      # or "europe"
+
+
+def _ml_dir():
+    """Folder that holds features.py (this notebook is …/ml/notebooks/03_explore_table)."""
+    try:
+        nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
+        return "/Workspace" + nb.split("/ml/notebooks/")[0] + "/ml"
+    except Exception:
+        return os.path.join(os.getcwd(), "ml")
+
+
+ML_DIR = _ml_dir()
+SAMPLE = "logger"              # "logger" (ErrorPredictionLogExp output), "sample", or "dev_fixture"
+DATASET = "authors_range"      # dev fixture: "world" or "europe"
 
 sys.path.insert(0, ML_DIR)
 from features import FEATURES, build_table  # noqa: E402
 
 if SAMPLE == "dev_fixture":
     run_dir, data_dir = f"{VOL}/output/ml/dev_fixture/{DATASET}", f"{VOL}/data/ml/dev_fixture/{DATASET}"
+elif SAMPLE == "logger":
+    run_dir, data_dir = f"{VOL}/output/ml/{DATASET}", f"{VOL}/data/ml/{DATASET}"
 else:
     run_dir, data_dir = f"{VOL}/output/ml/sample/{DATASET}", f"{VOL}/data/ml/{DATASET}"
 
@@ -89,6 +104,6 @@ print(f"skew_pred is exactly 0 on {(df.skew_pred == 0).mean():.0%} of rows; "
 
 # COMMAND ----------
 
-q = df[df.scale == 8].qId.sample(1, random_state=1).iloc[0]
+q = df[df.scale == df.scale.max()].qId.sample(1, random_state=1).iloc[0]   # largest query size
 display(df[df.qId == q][["mergeRate", "lonRes", "gt", "est", "relErr", "skew_pred"]]  # noqa: F821
         .sort_values("mergeRate"))

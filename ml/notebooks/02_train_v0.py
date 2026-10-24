@@ -27,9 +27,14 @@
 
 # MAGIC %md
 # MAGIC **Settings.** Run the next cell on its own first: it adds the input boxes (widgets) at the top of the notebook.
-# MAGIC For the development fixture, set `data_root` to `…/data/ml/dev_fixture`, `sample_root` to
-# MAGIC `…/output/ml/dev_fixture`, and `experiment` to a path in your own user folder, so fixture runs stay out of the
-# MAGIC shared experiment. Then run all.
+# MAGIC `datasets` is a comma-separated list of folders under `data_root` and `sample_root` (default `authors_range`,
+# MAGIC written by notebook 01 and the `ErrorPredictionLogExp` job task).
+# MAGIC For the development fixture, set `datasets` to `world,europe`, `data_root` to `…/data/ml/dev_fixture`,
+# MAGIC `sample_root` to `…/output/ml/dev_fixture`, and `experiment` to a path in your own user folder, so fixture runs
+# MAGIC stay out of the shared experiment. Then run all.
+# MAGIC
+# MAGIC Each dataset's gate table and feature importance are also written to `<sample_root>/<dataset>/report/`
+# MAGIC (`v0_results.csv`, `feature_importance.csv`) for notebook 04.
 
 # COMMAND ----------
 
@@ -51,7 +56,8 @@ try:
     dbutils.widgets.text("volume", VOL)  # noqa: F821
     dbutils.widgets.text("repo_root", _repo_root())  # noqa: F821
     dbutils.widgets.text("data_root", VOL + "/data/ml")  # noqa: F821  (dev fixture: .../data/ml/dev_fixture)
-    dbutils.widgets.text("sample_root", VOL + "/output/ml/sample")  # noqa: F821  (dev fixture: .../output/ml/dev_fixture)
+    dbutils.widgets.text("sample_root", VOL + "/output/ml")  # noqa: F821  (dev fixture: .../output/ml/dev_fixture)
+    dbutils.widgets.text("datasets", "authors_range")  # noqa: F821  (dev fixture: world,europe)
     dbutils.widgets.text("experiment", "/Shared/synopsislake-error-predictor")  # noqa: F821
     dbutils.widgets.text("seed", "0")  # noqa: F821
     get = dbutils.widgets.get  # noqa: F821
@@ -76,12 +82,12 @@ sys.path.insert(0, os.path.join(repo, "ml"))
 from features import FEATURES, build_table, check_estimates  # noqa: E402
 
 mlflow.set_experiment(get("experiment"))
-DATASETS = ["world", "europe"]
+DATASETS = [d.strip() for d in get("datasets").split(",") if d.strip()]
 EPS, DELTA = [0.10, 0.25], 0.05
 PARAMS = dict(n_estimators=2000, learning_rate=0.05, num_leaves=63, min_child_samples=50,
               subsample=0.8, subsample_freq=1, colsample_bytree=0.8, verbose=-1)
 print("features from", os.path.join(repo, "ml"), "| data", data_root, "| sample", sample_root,
-      "| experiment", get("experiment"))
+      "| datasets", DATASETS, "| experiment", get("experiment"))
 
 # COMMAND ----------
 
@@ -119,6 +125,7 @@ def scores(df, pred):
 
 results = []
 for ds in DATASETS:
+    ds_results = []
     df = build_table(f"{sample_root}/{ds}", f"{data_root}/{ds}")
     check_estimates(df)
     tr_ids, ca_ids, te_ids = split_ids(df.qId, seed)
@@ -145,14 +152,22 @@ for ds in DATASETS:
                 auc = roc_auc_score(err_te > eps, s_te[name])
                 mlflow.log_metrics({f"{name}_auc_{tag}": auc, f"{name}_coverage_{tag}": cov,
                                     f"{name}_violation_{tag}": viol})
-                results.append({"dataset": ds, "eps": eps, "score": name, "auc": round(auc, 3),
-                                "coverage": round(cov, 3), "violation": round(viol, 3)})
+                ds_results.append({"dataset": ds, "eps": eps, "score": name, "auc": round(auc, 3),
+                                   "coverage": round(cov, 3), "violation": round(viol, 3)})
 
+        importance = pd.DataFrame({"feature": FEATURES, "gain": model.booster_.feature_importance("gain")}) \
+            .sort_values("gain", ascending=False)
         with tempfile.TemporaryDirectory() as tmp:
             model.booster_.save_model(os.path.join(tmp, "model.txt"))      # LightGBM text format (DEC9)
-            pd.DataFrame({"feature": FEATURES, "gain": model.booster_.feature_importance("gain")}) \
-                .sort_values("gain", ascending=False).to_csv(os.path.join(tmp, "importance.csv"), index=False)
+            importance.to_csv(os.path.join(tmp, "importance.csv"), index=False)
             mlflow.log_artifacts(tmp)
+
+    report_dir = f"{sample_root}/{ds}/report"                          # read by notebook 04 and CI
+    os.makedirs(report_dir, exist_ok=True)
+    pd.DataFrame(ds_results).to_csv(f"{report_dir}/v0_results.csv", index=False)
+    importance.to_csv(f"{report_dir}/feature_importance.csv", index=False)
+    print("wrote", report_dir)
+    results += ds_results
 
 table = pd.DataFrame(results).pivot_table(index=["dataset", "eps", "score"],
                                           values=["auc", "coverage", "violation"])
