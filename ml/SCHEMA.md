@@ -34,6 +34,7 @@ method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,ce
 | `overlapSum` | answer[3]: sum of query/cell overlap ratios (0 if the query misses the histogram) |
 | `cellsTouched` | answer[4]: number of cells the query overlaps |
 | `srcSumEst` | sum over the source histograms of their answer[0] (reading every source, no merge) |
+| `learnedErr` | only with `-modelPath`: the learned model's estimate of `relErr` (see "Learned error predictor") |
 
 The canonical resolution is the number of distinct source boundaries minus one per axis
 (178 x 179 for sources 40, 56, 32, 48). Merge rates run from the canonical lon resolution down to
@@ -73,6 +74,7 @@ line 4+  one row of counts per lon bucket (latRes values each)
 | `-outDir` | `../out/ml/authors_range/` | run folder |
 | `-end`, `-step` | 42, 8 | last lon resolution and step |
 | `-fixStride` | false | use `j * data[0].length + k` instead of `j * data.length + k` for the beta densities |
+| `-modelPath` | none | LightGBM `model.txt`; adds the `learnedErr` column |
 | `-reproduceAuthors` | false | reload the sources at every merge rate like `DataDrivenRangeQueryMergingRateExp`; the global bounds then widen by 1e-6 per reload, which reproduces `DataDrivenQueryAvgRelError.txt` (`ourLH`) exactly |
 
 Local run (from the repo root, after `gunzip -k range_query/2.csv.gz range_query/3.csv.gz` and
@@ -84,3 +86,36 @@ java -cp SynopsisLake/target/SynopsisLake-0.0.1-SNAPSHOT.jar:<commons-math3.jar>
 python ml/prepare_authors_range.py range_query/dataDrivenQuery/srcQuery-40-56-32-48-Ans.csv data/ml/authors_range
 python ml/train_v0_local.py out/ml/authors_range data/ml/authors_range
 ```
+
+## Learned error predictor (Java, package `predictor`)
+
+Replaces the Skewness-Align score (`predErr`) with a trained LightGBM regression model. Any `model.txt` from
+`Booster.save_model` works: the feature list and order come from the file, so a model with other features, or
+without `skew_pred` / `log_alpha`, needs no code change.
+
+```java
+ErrorPredictor p = LearnedErrorPredictor.load("model.txt");          // or new SkewnessAlignPredictor()
+QueryErrorEstimator est = p.bind(new SynopsisContext(merged, sources, mergeRate, beta));
+double err = est.estimate(minLon, maxLon, minLat, maxLat);           // estimated relative error
+```
+
+- `beta` (the merged histogram's beta distribution) is only read by Skewness-Align and by models that use
+  `skew_pred` / `log_alpha`; pass `null` for other models.
+- `FeatureRegistry` maps each feature name to its Java code (all of `features.py` and `features_v1.py`). A model
+  that names an unknown feature is rejected at load; add new ones with `FeatureRegistry.register`. A Java
+  feature must give the training code's value.
+- Optional `model.properties` next to the model: `label.transform` = `log` (default, the model predicts
+  `log(relErr)` as in `features.build_table`) or `identity`; `gate.cutoff` = calibrated cutoff, used by
+  `ErrorGate` (`useSynopsis(err)` is true at or below it). The cutoff is not in `model.txt`; take it from
+  `gate_eval.cutoff`.
+- Not supported (rejected at load): non-regression objectives, multiclass, linear trees.
+
+Check a model against LightGBM itself:
+
+```
+java -cp ... sigspatial25.ErrorPredictionLogExp ... -modelPath model.txt -outDir out/ml/authors_range
+python ml/check_java_parity.py out/ml/authors_range data/ml/authors_range model.txt
+```
+
+Features differ from numpy in the last bit, so a model that has split on rounding noise sends a few rows
+(0.1% for the v0 model) down another path; rank and AUC are unchanged.

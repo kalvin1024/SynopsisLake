@@ -9,6 +9,10 @@ import java.util.TreeSet;
 import org.apache.commons.math3.distribution.BetaDistribution;
 
 import histogram.SimpleSpatialHistogramOpt;
+import predictor.ErrorPredictor;
+import predictor.LearnedErrorPredictor;
+import predictor.QueryErrorEstimator;
+import predictor.SynopsisContext;
 import utils.UtilsFunction;
 
 /**
@@ -23,20 +27,25 @@ import utils.UtilsFunction;
  * (each reload widens the global bounds by varepsilon again), which reproduces
  * dataDrivenQuery/results/DataDrivenQueryAvgRelError.txt exactly. -fixStride true computes the beta
  * distribution with the correct row stride (data[0].length instead of data.length).
+ *
+ * -modelPath <model.txt> also scores every query with that LightGBM model (predictor.LearnedErrorPredictor)
+ * and adds a learnedErr column: the model's estimate of the relative error, to be compared with predErr.
  */
 public class ErrorPredictionLogExp extends CountHistExp {
 
 	String outDir;
 	boolean reproduceAuthors;
 	boolean fixStride;
+	ErrorPredictor learned;
 
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
-			int end, int step, boolean fixStride, boolean reproduceAuthors) throws IOException {
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath) throws IOException {
 		super(dataDir.endsWith("/") ? dataDir : dataDir + "/", "", numFile, 2, 0.5, queryFile);
 		setSrcResolution(srcRes);
 		this.outDir = outDir.endsWith("/") ? outDir : outDir + "/";
 		this.fixStride = fixStride;
 		this.reproduceAuthors = reproduceAuthors;
+		this.learned = modelPath == null ? null : LearnedErrorPredictor.load(modelPath);
 		new File(this.outDir).mkdirs();
 
 		SimpleSpatialHistogramOpt[] srcHists = loadSynopsisFromData();
@@ -50,7 +59,7 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		ArrayList<double[]> rangeQueries = loadRangeQuery(queryFile);
 		FileWriter rows = new FileWriter(this.outDir + "rows.csv");
 		rows.write("method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,"
-				+ "cellsTouched,srcSumEst\n");
+				+ "cellsTouched,srcSumEst" + (learned == null ? "" : ",learnedErr") + "\n");
 
 		boolean first = true;
 		for (int lonRes = canonicalLon; lonRes >= end; lonRes -= step) {
@@ -93,6 +102,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		for (int sId = 0; sId < srcHists.length; sId++) {
 			betaSrc[sId] = beta(srcHists[sId]);
 		}
+		QueryErrorEstimator learnedErr = learned == null ? null
+				: learned.bind(new SynopsisContext(arm, srcHists, mergeRate, betaArm));
 		int lonRes = arm.getLonBoundary().length - 1;
 		int latRes = arm.getLatBoundary().length - 1;
 		double totalRelErr = 0;
@@ -114,7 +125,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 					.append(qId).append(',').append(gt).append(',').append(ans[0]).append(',').append(relErr)
 					.append(',').append(ans[2]).append(',').append(betaArm.getAlpha()).append(',')
 					.append(ans.length > 3 ? ans[3] : 0.0).append(',').append(ans.length > 4 ? (int) ans[4] : 0)
-					.append(',').append(srcSum).append('\n');
+					.append(',').append(srcSum);
+			if (learnedErr != null) {
+				sb.append(',').append(learnedErr.estimate(q[0], q[1], q[2], q[3]));
+			}
+			sb.append('\n');
 			rows.write(sb.toString());
 		}
 		return totalRelErr / rangeQueries.size();
@@ -193,6 +208,7 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		int step = 8;
 		boolean fixStride = false;
 		boolean reproduceAuthors = false;
+		String modelPath = null;
 
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].equals("-dataDir")) {
@@ -213,6 +229,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 				fixStride = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-reproduceAuthors")) {
 				reproduceAuthors = Boolean.parseBoolean(args[++i]);
+			} else if (args[i].equals("-modelPath")) {
+				modelPath = args[++i];
 			} else {
 				throw new IllegalArgumentException("unknown argument " + args[i]);
 			}
@@ -222,8 +240,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		}
 		System.out.println("dataDir=" + dataDir + " numFile=" + numFile + " queryFile=" + queryFile + " outDir="
 				+ outDir + " end=" + end + " step=" + step + " fixStride=" + fixStride + " reproduceAuthors="
-				+ reproduceAuthors);
+				+ reproduceAuthors + " modelPath=" + modelPath);
 		new ErrorPredictionLogExp(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride,
-				reproduceAuthors);
+				reproduceAuthors, modelPath);
 	}
 }
