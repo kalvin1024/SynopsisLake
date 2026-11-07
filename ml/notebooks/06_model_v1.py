@@ -3,269 +3,183 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # dependencies = [
-#   "lightgbm",
+#   "lightgbm==4.6.0",
 # ]
 # ///
 # MAGIC %md
-# MAGIC # 06 · Model v1: new inputs, ablations, generalization
+# MAGIC # 06 · 個人模型訓練與 feature ablation
 # MAGIC
-# MAGIC Builds on model v0 (notebook 02) with the same label, splits and gate, and asks three questions:
+# MAGIC 這份 notebook 重用 `features_v1.py` 與 `gate_eval.py` 的訓練／split／calibration 邏輯。
+# MAGIC 預設只訓練 **v0、v1，seed 0**。不需要 GitHub Actions 或 `DATABRICKS_TOKEN`。
 # MAGIC
-# MAGIC 1. **Do source-level inputs help?** v1 adds 9 inputs to v0's 19 (`ml/features_v1.py`):
-# MAGIC     * 7 that describe the query on each per-file source histogram
-# MAGIC     * 2 that measure how far the merged answer moved away from the no-merge answer (`merge_shift`)
+# MAGIC **第一次操作：** 先執行套件與「設定」兩格，確認上方 widgets，再執行後續 cells。
+# MAGIC 不修改團隊資料。`data_root`、`sample_root` 只讀；每次在個人 `output_root` 下建立新的 run 目錄。
+# MAGIC 預設複製必要輸入到該 run，保存 SHA-256、實際 split、模型、feature 順序及 calibration cutoffs。
 # MAGIC
-# MAGIC     All of them come from synopses only.
-# MAGIC 2. **Which inputs matter?** Ablations drop one input group at a time: Skewness-Align, source-level, merge
-# MAGIC    shift; there is also a geometry-only model.
-# MAGIC 3. **Does it transfer?**
-# MAGIC     * Train on high merge rates (40% and up), test on low ones.
-# MAGIC     * Train on the western half of the map, test on the eastern half.
-# MAGIC
-# MAGIC     Each is compared with a model trained on everything and tested on the same queries.
-# MAGIC
-# MAGIC **How to read the results.** The gate is evaluated *per merge rate*: one cutoff per merged synopsis, set on
-# MAGIC calibration queries for at most 5% violations, then averaged over the 18 rates. That matches deployment, where a
-# MAGIC query is answered from one merged synopsis. `coverage_per_rate` is the share of test queries the gate answers from
-# MAGIC the synopsis. The pooled numbers (one cutoff over all rates, as in notebook 02) are kept for comparison.
-# MAGIC
-# MAGIC **Runtime:** about 33 model fits (7 variants × 3 seeds, plus 2 tests × 2 settings × 3 seeds). Use the `seeds`,
-# MAGIC `variants` and `generalization` widgets to run less.
-# MAGIC
-# MAGIC Locally: `VOLUME=… REPO_ROOT=… DATA_ROOT=… SAMPLE_ROOT=… DATASET=… python ml/notebooks/06_model_v1.py`.
+# MAGIC 這是**離線答案品質實驗**。它不執行 raw-data fallback，也不量測端到端查詢延遲。
 
 # COMMAND ----------
 
-# MAGIC %pip install lightgbm
+# MAGIC %pip install lightgbm==4.6.0
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 設定：先執行下一格，再填 widgets
+# MAGIC
+# MAGIC * `repo_root`：你目前這份個人 Git folder 的完整路徑。
+# MAGIC * `data_root`：內含 `<dataset>/queries-Ans.txt`、`queries-meta.csv` 的資料根目錄。
+# MAGIC * `sample_root`：內含 `<dataset>/rows.csv`、`arm_*.txt`、`src_*.txt` 的 logger 輸出根目錄。
+# MAGIC * `output_root`：個人結果目錄，不能放在 repo、輸入目錄或 `/Workspace/Shared` 內。
+# MAGIC * `experiment`：個人 MLflow 路徑，例如 `/Users/你的帳號/synopsislake-model-ablation`。
+# MAGIC * 第一次維持 `variants=v0,v1`、`seeds=0`、`generalization=false`。
+# MAGIC * `copy_inputs=true` 將輸入快照保存在個人 run；若沒有資料權限，請先取得授權，不要跳過檢查。
+# MAGIC * `mlflow_enabled=false` 可只保存本次檔案，錯誤不會被悄悄當成 MLflow 成功。
 
 # COMMAND ----------
 
 import os
+from pathlib import Path
 import sys
 
 VOL = "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake"
 
 
 def _repo_root():
-    """Folder that holds ml/ (this notebook is …/ml/notebooks/06_model_v1)."""
     try:
-        nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
-        root = nb.split("/ml/notebooks/")[0]
+        name = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
+        root = name.split("/ml/notebooks/")[0]
         return root if root.startswith("/Workspace/") else "/Workspace" + root
     except Exception:
         try:
-            return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            return str(Path(__file__).resolve().parents[2])
         except NameError:
             return os.getcwd()
 
 
-def _defaults(volume):
-    return {"volume": volume, "repo_root": _repo_root(), "data_root": volume + "/data/ml",
-            "sample_root": volume + "/output/ml", "dataset": "authors_range", "seeds": "0,1,2",
-            "variants": "all", "generalization": "true", "experiment": "/Shared/synopsislake-error-predictor"}
+def _defaults():
+    repo = _repo_root()
+    output, experiment = "", ""
+    parts = Path(repo).parts
+    if "Users" in parts and len(parts) > parts.index("Users") + 1:
+        i = parts.index("Users") + 1
+        home = Path(*parts[:i + 1])
+        output = str(home / "synopsislake-results")
+        experiment = f"/Users/{parts[i]}/synopsislake-model-ablation"
+    volume = os.environ.get("VOLUME", VOL)
+    return dict(repo_root=repo, data_root=volume + "/data/ml",
+                sample_root=volume + "/output/ml", output_root=output,
+                dataset="authors_range", seeds="0", variants="v0,v1", generalization="false",
+                experiment=experiment, mlflow_enabled="true", copy_inputs="true",
+                epsilons="0.25", delta="0.05", max_trees="4000", num_threads="2")
 
 
+DEFAULTS = _defaults()
 try:
-    for k, v in _defaults(VOL).items():
-        dbutils.widgets.text(k, v)  # noqa: F821
+    for key, value in DEFAULTS.items():
+        dbutils.widgets.text(key, value)  # noqa: F821
     get = dbutils.widgets.get  # noqa: F821
 except NameError:
-    _env_defaults = _defaults(os.environ.get("VOLUME", VOL))
-
     def get(name):
-        return os.environ.get(name.upper(), _env_defaults[name])
-
-
-def show(df):
-    try:
-        display(df)  # noqa: F821
-    except NameError:
-        print(df.to_string())
+        return os.environ.get(name.upper(), DEFAULTS[name])
 
 # COMMAND ----------
 
-import time  # noqa: E402
-import warnings  # noqa: E402
+# MAGIC %md
+# MAGIC ## 檢查計畫
+# MAGIC
+# MAGIC `all` 包含 10 個版本；3 個 seeds 會訓練 30 次，另開 generalization 再加 12 次。
+# MAGIC 請先看下面的訓練次數，再決定是否執行。
+# MAGIC 所有版本共用同一份 feature table、相同 query split、LightGBM 參數與 early stopping 規則。
 
-import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
+# COMMAND ----------
 
-warnings.filterwarnings("ignore", message=".*eval_set.*")   # newer LightGBM renamed the argument; still works
-sys.path.insert(0, os.path.join(get("repo_root"), "ml"))
-from features import FEATURES, check_estimates  # noqa: E402
-from features_v1 import FEATURES_V1, GROUPS, build_table_v1, check_source_estimates  # noqa: E402
-from gate_eval import PARAMS, run  # noqa: E402
+import importlib
 
+repo = Path(get("repo_root")).resolve()
+if not (repo / "ml/model_ablation.py").is_file():
+    raise FileNotFoundError("repo_root 不正確，或尚未切換到 experiments/model-ablation")
+sys.path.insert(0, str(repo / "ml"))
+# A session may have cached code before a branch switch or a local edit.
+# Re-import this small module set from the explicitly selected Git folder.
+for module_name in ("model_ablation", "features_v1", "features", "gate_eval"):
+    sys.modules.pop(module_name, None)
+importlib.invalidate_caches()
+from model_ablation import run_experiment, variants  # noqa: E402
+
+CONFIG = {key: get(key) for key in DEFAULTS}
+requested = list(variants()) if CONFIG["variants"] == "all" else [v.strip() for v in CONFIG["variants"].split(",")]
+if set(requested) - variants().keys():
+    raise ValueError(f"不支援的 variants；可選 {list(variants())}")
+seeds = [int(s.strip()) for s in CONFIG["seeds"].split(",")]
+fits = len(requested) * len(seeds)
+if CONFIG["generalization"].lower() == "true":
+    fits += 4 * len(seeds)
+print("repo:", repo)
+print("variants:", requested, "seeds:", seeds, "model fits:", fits)
+print("read-only data:", CONFIG["data_root"])
+print("read-only logger exports:", CONFIG["sample_root"])
+print("personal output root:", CONFIG["output_root"] or "尚未設定，請先填寫")
+print("MLflow experiment:", CONFIG["experiment"])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 執行訓練
+# MAGIC
+# MAGIC 若缺少 Volume／檔案／權限，這格會報出路徑，不會虛構資料或沿用歷史結果。
+# MAGIC 預設排除真值 `<10` 的 query，與團隊現有 pipeline 相同；這輪不能推論零答案的品質。
+
+# COMMAND ----------
+
+result_dir = run_experiment(CONFIG)
+print("本次結果：", result_dir)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 查看這次實際結果
+# MAGIC
+# MAGIC * `coverage_per_rate_mean`：每個 merge rate 各自校準後，接受比例的平均。
+# MAGIC * `violation_per_rate_mean`：有接受答案的 rates，其違規率平均；**接受 0 筆時是空值，不是 0%**。
+# MAGIC * `violation_pooled_per_rate_gates_mean`：把各 rate gate 的接受／違規案例加總後計算，與前者不同。
+# MAGIC * 精確的分子、分母與 cutoff 在 `gate_details.csv`。`quality_target_met` 是 test 的觀察結果，沒有統計保證。
+# MAGIC * 門檻只看 calibration，不可用 test 反覆調整。
+# MAGIC * `oracle` 使用真實誤差，只是離線參考，不是可部署的模型。
+# MAGIC
+# MAGIC `models/<variant>/seed_<seed>/` 包含 `model.txt`、`schema.json`、`cutoffs.json`、
+# MAGIC `cohorts.csv`、`test_predictions.csv`。cutoff 是模型的 **log-error score**，不是直接的相對誤差。
+# MAGIC `run.json` 的 status 必須為 complete，才代表本輪全部完成。
+
+# COMMAND ----------
+
+import json
+import pandas as pd
+
+summary = pd.read_csv(result_dir / "v1_summary.csv")
+details = pd.read_csv(result_dir / "gate_details.csv")
 try:
-    import mlflow
-    mlflow.set_experiment(get("experiment"))
-except Exception as e:                                         # runs without MLflow too (locally)
-    print("MLflow off:", str(e)[:80])
-    mlflow = None
-
-dataset = get("dataset")
-run_dir, data_dir = f"{get('sample_root')}/{dataset}", f"{get('data_root')}/{dataset}"
-report_dir = f"{run_dir}/report"
-os.makedirs(report_dir, exist_ok=True)
-SEEDS = [int(s) for s in get("seeds").split(",")]
-
-df = build_table_v1(run_dir, data_dir)
-queries = pd.read_csv(f"{data_dir}/queries-Ans.txt", header=None)
-df = df.merge(((queries[0] + queries[1]) / 2).rename("center_lon").rename_axis("qId").reset_index(), on="qId")
-print(f"{len(df):,} rows, {df.qId.nunique():,} queries | estimate gap {check_estimates(df):.1e} | "
-      f"no-merge estimate gap {check_source_estimates(df):.1e} | {len(FEATURES)} v0 inputs, {len(FEATURES_V1)} v1 inputs")
-
-# COMMAND ----------
-
-# MAGIC %md ## 1 · Ablations
-
-# COMMAND ----------
-
-
-def drop(features, group):
-    return [f for f in features if f not in GROUPS[group]]
-
-
-VARIANTS = {
-    "v0": FEATURES,
-    "v0_no_skew": drop(FEATURES, "skew"),
-    "v1": FEATURES_V1,
-    "v1_no_skew": drop(FEATURES_V1, "skew"),
-    "v1_no_shift": drop(FEATURES_V1, "shift"),
-    "v1_no_source": drop(FEATURES_V1, "source"),
-    "geometry_only": GROUPS["shape"] + GROUPS["merge"],
-}
-if get("variants") != "all":
-    VARIANTS = {k: VARIANTS[k] for k in get("variants").split(",")}
-
-
-def log_run(name, seed, features, res):
-    if mlflow is None:
-        return
-    with mlflow.start_run(run_name=f"v1-{dataset}-{name}-seed{seed}"):
-        mlflow.log_params({"dataset": dataset, "variant": name, "seed": seed, "n_features": len(features),
-                           "features": ",".join(features), **PARAMS})
-        for r in res.itertuples():
-            tag = f"{r.score}_eps{int(r.eps * 100)}"
-            mlflow.log_metrics({f"{tag}_auc_per_rate": r.auc_per_rate, f"{tag}_coverage_per_rate": r.coverage_per_rate,
-                                f"{tag}_violation_per_rate": r.violation_per_rate, f"{tag}_coverage_pooled": r.coverage})
-        mlflow.log_metric("best_iteration", int(res.best_iteration.iloc[0]))
-
-
-results, importances = [], []
-for name, feats in VARIANTS.items():
-    for seed in SEEDS:
-        t0 = time.time()
-        res, imp, _ = run(df, feats, seed)
-        res.insert(0, "variant", name)
-        res.insert(1, "n_features", len(feats))
-        results.append(res)
-        importances.append(imp.assign(variant=name, seed=seed))
-        log_run(name, seed, feats, res)
-        print(f"{name} seed {seed}: {time.time() - t0:.0f}s, best iteration {res.best_iteration.iloc[0]}")
-ablations = pd.concat(results, ignore_index=True)
-ablations.to_csv(f"{report_dir}/v1_ablations.csv", index=False)
-pd.concat(importances).to_csv(f"{report_dir}/v1_importance.csv", index=False)
+    display(summary)  # noqa: F821
+    display(details[(details.score == "learned") & (details.scope == "per_rate")])  # noqa: F821
+except NameError:
+    print(summary.to_string(index=False))
+print("Gate details:", result_dir / "gate_details.csv")
+print("Run metadata:", result_dir / "run.json")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2 · Summary: mean (and spread) over seeds
+# MAGIC ## 下一輪可做的消融
 # MAGIC
-# MAGIC The learned rows show one line per variant. Baselines don't depend on the variant, so they are shown once.
-# MAGIC `oracle` uses the true error and is the ceiling.
-
-# COMMAND ----------
-
-cols = ["auc_per_rate", "coverage_per_rate", "violation_per_rate", "auc", "coverage", "violation"]
-learned = ablations[ablations.score == "learned"]
-summary = learned.groupby(["eps", "variant"])[cols].agg(["mean", "std"]).round(3)
-summary.columns = [f"{c}_{s}" for c, s in summary.columns]
-first = list(VARIANTS)[0]
-base = (ablations[(ablations.score != "learned") & (ablations.variant == first)]
-        .groupby(["eps", "score"])[cols].mean().round(3))
-show(summary.reset_index())
-show(base.reset_index())
-summary.reset_index().to_csv(f"{report_dir}/v1_summary.csv", index=False)
-
-eps = 0.25
-s = summary.reset_index()
-s = s[s.eps == eps].set_index("variant").reindex(list(VARIANTS))
-fig, ax = plt.subplots(figsize=(8, 4))
-ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std, color="#4C78A8")
-ax.axhline(base.loc[(eps, "oracle"), "coverage_per_rate"], ls="--", color="grey", label="oracle (true error)")
-ax.axhline(base.loc[(eps, "skew_align"), "coverage_per_rate"], ls=":", color="black", label="Skewness-Align")
-ax.set_ylabel("share answered from synopsis")
-ax.set_title(f"Gate coverage at {int(eps * 100)}% error limit, at most 5% violations (per merge rate)")
-ax.legend()
-plt.xticks(rotation=20)
-plt.tight_layout()
-fig.savefig(f"{report_dir}/v1_coverage.png", dpi=150)
-plt.show()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3 · Generalization
+# MAGIC **重現內建實驗：** `variants=v0,v1,v1_no_source,v1_no_shift`、`seeds=0,1,2`。
+# MAGIC `v1_no_source` 仍有 merge-shift，因此仍依賴 source histogram 的估計。
 # MAGIC
-# MAGIC * `shifted`: trained only on the training side of the split, then tested on the other side.
-# MAGIC * `in_distribution`: trained on all training queries, then tested on the same test queries.
+# MAGIC **少量來源資訊是否足夠：**
+# MAGIC `variants=v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift`。
+# MAGIC 這三個子集分別加入來源的 bounds、邊界 density contrast，以及兩者。
+# MAGIC 與全 7 個來源特徵比較，找出哪些資訊最有用。
 # MAGIC
-# MAGIC The gap between the two is the cost of never having seen that part of the data.
-
-# COMMAND ----------
-
-if get("generalization").lower() == "true":
-    mid = (df.center_lon.min() + df.center_lon.max()) / 2
-    tests = {"rate_high_to_low": (df.mergeRate >= 0.40, df.mergeRate < 0.40),
-             "west_to_east": (df.center_lon < mid, df.center_lon >= mid)}
-    gen = []
-    for tname, (train_side, test_side) in tests.items():
-        for seed in SEEDS:
-            for setting, train_mask in [("shifted", train_side), ("in_distribution", None)]:
-                res, _, _ = run(df, FEATURES_V1, seed, train_mask=train_mask, test_mask=test_side)
-                res.insert(0, "test", tname)
-                res.insert(1, "setting", setting)
-                gen.append(res)
-                print(tname, setting, seed, "done")
-    gen = pd.concat(gen, ignore_index=True)
-    gen.to_csv(f"{report_dir}/v1_generalization.csv", index=False)
-    g = (gen[gen.score == "learned"].groupby(["test", "eps", "setting"])
-         [["auc_per_rate", "coverage_per_rate", "violation_per_rate"]].mean().round(3))
-    show(g.reset_index())
-    print(f"west/east split at longitude {mid:.2f}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## What to look for (authors' data, from the prototype run)
-# MAGIC
-# MAGIC These numbers come from the local prototype, as means over seeds 0–2, evaluated per merge rate. Yours should be close;
-# MAGIC library versions shift them slightly.
-# MAGIC
-# MAGIC | variant | AUC | coverage at 25% | coverage at 10% |
-# MAGIC |---|---|---|---|
-# MAGIC | `v1` | 0.880 | 16.0% | 3.3% |
-# MAGIC | `v1_no_shift` (v0 + source inputs) | 0.876 | 15.8% | 2.9% |
-# MAGIC | `v1_no_skew` | 0.874 | 12.1% | 1.2% |
-# MAGIC | `v1_no_source` (v0 + merge shift) | 0.852 | 11.7% | 2.7% |
-# MAGIC | `v0` | 0.822 | 10.4% | 2.7% |
-# MAGIC | `v0_no_skew` | 0.819 | 7.8% | 1.3% |
-# MAGIC | `geometry_only` | 0.613 | 0.6% | 0.2% |
-# MAGIC | Skewness-Align alone | 0.605 | 0.2% | 0.0% |
-# MAGIC | oracle | 1.000 | 54.4% | 25.3% |
-# MAGIC
-# MAGIC * **Source-level inputs are the main gain.** AUC rises from 0.82 to 0.88, and coverage at 25% from 10% to 16%.
-# MAGIC   Merge shift adds little once the source inputs are in.
-# MAGIC * **Skewness-Align is useful as an input, though weak as a score on its own.** Removing it costs 3–4 points of
-# MAGIC   coverage.
-# MAGIC * **Geometry alone (query shape and merge rate) predicts almost nothing**, so the histogram counts carry the signal.
-# MAGIC * **Violations average 5–6%, slightly above the 5% target.** The cutoff is empirical, so a guarantee needs
-# MAGIC   conformal calibration.
-# MAGIC * **Every model except geometry-only reached the 4,000-tree cap**, so more capacity may help further.
-# MAGIC * **Generalization (v1, AUC at the 25% limit):**
-# MAGIC     * High to low merge rates: 0.81 shifted vs 0.90 in distribution. Coverage falls from 11.6% to 4.9%.
-# MAGIC     * West to east: 0.72 vs 0.89. Coverage falls from 16.7% to 2.1%. The east uses different source files and
-# MAGIC       resolutions (32 and 48 cells) from the west (40 and 56), so this tests a change of geography and of synopsis
-# MAGIC       together.
-# MAGIC     * In both tests the shifted model still ranks better than Skewness-Align on the same queries (0.61–0.62).
+# MAGIC 修改 widgets 後，從「檢查計畫」往下重跑。每次會建立新 run，不覆蓋上次的結果。
+# MAGIC 改 variants 不會減少這份離線程式預先建立的來源特徵，也不代表已量測到 I/O 或查詢加速。
+# MAGIC `generalization=true` 另外測 high-rate→low-rate 與 west→east；使用評估側的 calibration queries。
+# MAGIC 訓練限制與測試限制是行過濾，另存每個模型實際用到的 cohorts，方便檢查資料切分。
