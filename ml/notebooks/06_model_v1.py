@@ -22,13 +22,16 @@
 # MAGIC | `v0_src_bound_contrast` | 21 | Add both features |
 # MAGIC | `v1_no_shift` | 26 | Reference using all seven additional source features |
 # MAGIC
-# MAGIC All five variants exclude merge-shift features. The default run uses **seed 0 and five model fits**.
+# MAGIC All five variants exclude merge-shift features. This continuation reuses the completed **seed 0**
+# MAGIC run, trains **seeds 1 and 2**, and compares all three seeds. It performs **10 new model fits**.
 # MAGIC GitHub Actions and `DATABRICKS_TOKEN` are not required.
 # MAGIC
 # MAGIC Inputs are read-only. Each run creates a new personal output directory and, by default, snapshots
 # MAGIC the required inputs with SHA-256 fingerprints. Models, feature order, splits, and cutoffs are saved.
 # MAGIC This is an **offline answer-quality experiment**. It does not execute raw-data fallback or measure
 # MAGIC end-to-end query latency. Using fewer model inputs does not itself reduce source-histogram I/O.
+# MAGIC A previous result is combined only after checking the input fingerprints, feature/training code,
+# MAGIC parameters, package versions, and feature order. A mismatch stops the comparison.
 
 # COMMAND ----------
 
@@ -46,18 +49,22 @@
 # MAGIC * `sample_root`: the logger-output root containing `<dataset>/rows.csv`, `arm_*.txt`, and `src_*.txt`.
 # MAGIC * `output_root`: a personal results directory outside the repo, input directories, and `/Workspace/Shared`.
 # MAGIC * `experiment`: a personal MLflow path, such as `/Users/<your-account>/synopsislake-model-ablation`.
-# MAGIC * Keep `seeds=0` and `generalization=false` for the first source-feature study.
+# MAGIC * Use `seeds=1,2` and `generalization=false` to extend the completed seed 0 study.
+# MAGIC * `baseline_run=auto` finds the single compatible completed seed 0 run in `output_root`.
+# MAGIC   If more than one matches, enter the exact seed 0 run directory instead. Set it to `none` to run
+# MAGIC   a separate experiment without combining earlier results.
 # MAGIC * `copy_inputs=true` snapshots the inputs. Missing files or permissions must be resolved before training.
 # MAGIC * Set `mlflow_enabled=false` to save files without MLflow. Requested MLflow failures are not silently ignored.
 # MAGIC
-# MAGIC **Existing Databricks widgets retain their previous values after a Git pull.** If `variants` still
-# MAGIC shows `v0,v1`, replace that one field with:
+# MAGIC **Existing Databricks widgets retain their previous values after a Git pull.** Change `seeds`
+# MAGIC from `0` to `1,2`. If `variants` is not already the following list, update that field too:
 # MAGIC
 # MAGIC ```text
 # MAGIC v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift
 # MAGIC ```
 # MAGIC
-# MAGIC Other settings and personal paths can stay as they were. The plan below should report **5 model fits**.
+# MAGIC Other settings and personal paths can stay as they were. The plan below should report **10 model fits**
+# MAGIC and identify the previous seed 0 directory. It stops before training if the comparison is incompatible.
 
 # COMMAND ----------
 
@@ -95,9 +102,9 @@ def _defaults():
     volume = os.environ.get("VOLUME", VOL)
     return dict(repo_root=repo, data_root=volume + "/data/ml",
                 sample_root=volume + "/output/ml", output_root=output,
-                dataset="authors_range", seeds="0", variants=SOURCE_STUDY_VARIANTS, generalization="false",
+                dataset="authors_range", seeds="1,2", variants=SOURCE_STUDY_VARIANTS, generalization="false",
                 experiment=experiment, mlflow_enabled="true", copy_inputs="true",
-                epsilons="0.25", delta="0.05", max_trees="4000", num_threads="2")
+                epsilons="0.25", delta="0.05", max_trees="4000", num_threads="2", baseline_run="auto")
 
 
 DEFAULTS = _defaults()
@@ -114,9 +121,10 @@ except NameError:
 # MAGIC %md
 # MAGIC ## Review the training plan
 # MAGIC
-# MAGIC The default study has five variants and one seed: **5 fits**.
-# MAGIC Using `seeds=0,1,2` produces 15 fits. Selecting `all` produces 10 variants per seed.
-# MAGIC Enabling generalization adds four fits per seed.
+# MAGIC The continuation uses five variants and two new seeds: **10 fits**. The completed seed 0 models
+# MAGIC are reused, not retrained. The comparison contains the same five variants across seeds 0, 1, and 2.
+# MAGIC An independent run can be configured with `baseline_run=none`; it will not create a three-seed comparison.
+# MAGIC Enabling generalization adds four fits per seed and is not part of the three-seed ablation comparison.
 # MAGIC All variants share the same feature table, query split, LightGBM parameters, and early-stopping rules.
 
 # COMMAND ----------
@@ -129,10 +137,11 @@ if not (repo / "ml/model_ablation.py").is_file():
 sys.path.insert(0, str(repo / "ml"))
 # A session may have cached code before a branch switch or a local edit.
 # Re-import this small module set from the explicitly selected Git folder.
-for module_name in ("model_ablation", "features_v1", "features", "gate_eval"):
+for module_name in ("model_ablation", "compare_ablation_runs", "features_v1", "features", "gate_eval"):
     sys.modules.pop(module_name, None)
 importlib.invalidate_caches()
 from model_ablation import run_experiment, variants  # noqa: E402
+from compare_ablation_runs import combine_runs, find_compatible_baseline  # noqa: E402
 
 CONFIG = {key: get(key) for key in DEFAULTS}
 requested = list(variants()) if CONFIG["variants"] == "all" else [v.strip() for v in CONFIG["variants"].split(",")]
@@ -148,6 +157,12 @@ print("read-only data:", CONFIG["data_root"])
 print("read-only logger exports:", CONFIG["sample_root"])
 print("personal output root:", CONFIG["output_root"] or "Not set; enter a personal directory first")
 print("MLflow experiment:", CONFIG["experiment"])
+baseline = None
+if CONFIG["baseline_run"].strip().lower() != "none":
+    baseline = find_compatible_baseline(CONFIG)
+    print("Compatible seed 0 run:", baseline)
+else:
+    print("Independent run: no prior results will be combined.")
 
 # COMMAND ----------
 
@@ -161,8 +176,14 @@ print("MLflow experiment:", CONFIG["experiment"])
 
 # COMMAND ----------
 
+if {key: get(key) for key in DEFAULTS} != CONFIG:
+    raise ValueError("Settings changed; rerun the Review the training plan cell before training")
 result_dir = run_experiment(CONFIG)
 print("Results for this run:", result_dir)
+comparison_dir = None
+if baseline is not None:
+    comparison_summary, comparison_rates, comparison_dir = combine_runs(baseline, result_dir)
+    print("Three-seed comparison:", comparison_dir)
 
 # COMMAND ----------
 
@@ -186,20 +207,28 @@ print("Results for this run:", result_dir)
 # MAGIC Each `models/<variant>/seed_<seed>/` directory contains `model.txt`, `schema.json`, `cutoffs.json`,
 # MAGIC `cohorts.csv`, and `test_predictions.csv`. Cutoffs are in **predicted log-error score** space, not relative-error units.
 # MAGIC `run.json` must have `status=complete` before treating the full run as completed.
+# MAGIC When a seed 0 baseline is selected, the tables below combine seeds 0, 1, and 2. The new
+# MAGIC `comparison/` directory contains per-seed rows, three-seed summaries, per-rate summaries,
+# MAGIC and a provenance manifest. The old seed 0 directory is never modified.
+# MAGIC Repeated seeds reuse queries across different splits; their standard deviation is descriptive,
+# MAGIC not a confidence interval or a statistical guarantee.
 
 # COMMAND ----------
 
 import json
 import pandas as pd
 
-summary = pd.read_csv(result_dir / "v1_summary.csv")
-details = pd.read_csv(result_dir / "gate_details.csv")
+summary = comparison_summary if comparison_dir else pd.read_csv(result_dir / "v1_summary.csv")
+details = comparison_rates if comparison_dir else pd.read_csv(result_dir / "gate_details.csv")
 try:
     display(summary)  # noqa: F821
-    display(details[(details.score == "learned") & (details.scope == "per_rate")])  # noqa: F821
+    if comparison_dir:
+        display(details)  # noqa: F821
+    else:
+        display(details[(details.score == "learned") & (details.scope == "per_rate")])  # noqa: F821
 except NameError:
     print(summary.to_string(index=False))
-print("Gate details:", result_dir / "gate_details.csv")
+print("Gate details:", comparison_dir / "combined_gate_details.csv" if comparison_dir else result_dir / "gate_details.csv")
 print("Run metadata:", result_dir / "run.json")
 
 # COMMAND ----------
@@ -207,8 +236,9 @@ print("Run metadata:", result_dir / "run.json")
 # MAGIC %md
 # MAGIC ## Follow-up experiments
 # MAGIC
-# MAGIC After this first study, use the same five variants with `seeds=0,1,2` to assess variability (15 fits).
-# MAGIC Keep the same input cohort and hyperparameters. Preserve earlier results as independent run directories.
+# MAGIC The combined three-seed comparison describes variability across the existing query splits. It is not
+# MAGIC a new independent dataset, and its standard deviation is not a confidence interval.
+# MAGIC The original seed 0 and new seed 1/2 runs remain separate, with a derived comparison in the new run.
 # MAGIC
 # MAGIC To reproduce the older group-level ablation, select `v0,v1,v1_no_source,v1_no_shift` explicitly.
 # MAGIC `v1_no_source` still retains merge-shift features and therefore still depends on source estimates.

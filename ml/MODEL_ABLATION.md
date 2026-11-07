@@ -9,9 +9,9 @@
 1. 在 **自己的 Users Git folder** 切換至 `experiments/model-ablation` 並 Pull。
 2. 打開 `ml/notebooks/06_model_v1`，連接有權限使用的 Compute。
 3. 先執行套件安裝與設定 cells，確認 widgets。若舊 notebook 已有 widgets，舊值可能保留，請重新核對。
-4. 填好路徑，再從 **Review the training plan** 往下執行。先確認 model fits 顯示 5。
+4. 填好路徑，再從 **Review the training plan** 往下執行。先確認 model fits 顯示 10，並找到原來的 seed 0 run。
    Notebook 內的標題、說明與執行訊息已全部改為英文。
-   Databricks 會保留舊 widget 值；若 `variants` 仍是 `v0,v1`，請換成下表的五版本字串。
+   Databricks 會保留舊 widget 值；把 `seeds` 從 `0` 改為 `1,2`。若 `variants` 仍是 `v0,v1`，請換成下表的五版本字串。
 
 | Widget | 第一次設定 |
 |---|---|
@@ -22,7 +22,8 @@
 | `output_root` | 個人結果目錄，預設 `/Workspace/Users/<帳號>/synopsislake-results` |
 | `experiment` | 個人 MLflow experiment，預設 `/Users/<帳號>/synopsislake-model-ablation` |
 | `variants` | `v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift` |
-| `seeds` | `0` |
+| `seeds` | `1,2`，只補跑兩個 seeds；舊的 seed 0 不重跑 |
+| `baseline_run` | `auto`，自動找到唯一相容的 seed 0；也可填該 run 的完整路徑 |
 | `epsilons` / `delta` | `0.25` / `0.05` |
 | `generalization` | `false` |
 | `copy_inputs` | `true` |
@@ -59,8 +60,8 @@ Git clone 不會生成這些 logger 輸出。缺檔或權限錯誤時會停止�
 | 幾何資訊 baseline | `v0,v1,geometry_only` |
 
 `v0_src_bound` 只加 `src_bound_rel`；`v0_src_contrast` 只加 `src_edge_contrast`；第三個加兩者。
-這輪預設只跑 seed 0 的五個模型；先比較少量來源特徵和全部 7 個來源特徵。
-正式比較可改 `seeds=0,1,2`（五版本共 15 fits），每個 variant 使用相同 split、超參數與 early-stopping 規則。
+目前的預設接續先前五版本的 seed 0，只補跑 seed 1 和 2（共 10 fits）。
+舊結果與新結果保存在不同 run 目錄。每個 variant 使用相同 split、超參數與 early-stopping 規則。
 `all` 包含 10 個版本；3 seeds 為 30 fits。開啟 generalization 另外增加 12 fits。
 `generalization=true` 會跑 high merge rate→low 與 west→east，calibration 來自評估側；不能宣稱是不需目標資料的轉移。
 
@@ -71,6 +72,11 @@ v0 的 19 features、v1 的 28 features 沿用團隊程式。沒有更換模型�
 ## 結果與保存
 
 每次產生唯一的 `<output_root>/<dataset>-<run-id>/`，不覆蓋之前的 run。
+`baseline_run=auto` 只依設定與資料身分尋找唯一相容的 seed 0，並非根據 test 成績選擇。
+多個相符時請在 widget 填入要使用的 seed 0 run 完整路徑；找不到則不會自動重訓 seed 0。
+訓練前會比對輸入與快照的 SHA-256、features/訓練程式 hash、特徵順序、模型參數、epsilon/delta 和環境版本。
+訓練完成後再核對本次輸入，以偵測檢查後資料變更；不相容的 run 不會被合併。
+若必須使用不同版本的資料或套件，應使用相同條件重新跑三個 seeds：設定 `baseline_run=none`、`seeds=0,1,2`。這會做 15 fits，舊檔案仍保留。
 
 | 產物 | 內容 |
 |---|---|
@@ -82,6 +88,10 @@ v0 的 19 features、v1 的 28 features 沿用團隊程式。沒有更換模型�
 | `models/<variant>/seed_<seed>/model.txt` | 實際訓練的 LightGBM Booster |
 | `schema.json`、`cutoffs.json` | feature 順序、參數、label 定義、模型 score 空間中的門檻 |
 | `cohorts.csv`、`test_predictions.csv` | 該模型實際使用的 row cohorts 與離線 test 預測 |
+| `comparison/summary_3_seeds.csv` | 舊 seed 0 加新 seed 1、2 的平均與標準差 |
+| `comparison/combined_by_seed.csv` | 分開列出每個 seed 的結果與來源 run |
+| `comparison/per_rate_3_seeds.csv` | 每個 merge rate 的三 seed 統計、有效風險 seed 數與超標次數 |
+| `comparison/combined_gate_details.csv`、`provenance.json` | 原始 gate 細節與相容性檢查資訊 |
 
 MLflow 開啟時會記錄各模型的 params、metrics 與模型／評估 artifacts。
 MLflow 設定或寫入失敗會明確失敗，不會悄悄宣稱有記錄。
@@ -96,6 +106,7 @@ Databricks 未提供 notebook 的普通 `.py` 檔案時，仍保存 module hashe
 使用團隊既有 split_ids，先排除真值 `<10`，所以不評估零／小答案。
 模型 early stopping 只使用 training 的 validation slice；接受門檻只使用 calibration，不使用 test。
 每個 merge rate 的接受／違規數是 query–histogram cases；跨 rate 的同一 query 並非獨立新樣本。
+三個 seed 的 split 也可能包含重疊 query；seed 間標準差只是描述穩定性，不是信賴區間或顯著性檢定。
 
 `coverage_per_rate` 是各 rate 接受比例的平均。
 `violation_per_rate` 只平均有接受答案的 rates；`rates_with_acceptances` 說明分母。
