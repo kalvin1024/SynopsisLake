@@ -227,6 +227,33 @@ class SplitAndOutputTests(unittest.TestCase):
 
 
 class TrainingArtifactTests(unittest.TestCase):
+    def test_default_experiment_trains_the_five_source_subset_variants(self):
+        expected = {
+            "v0": 19,
+            "v0_src_bound": 20,
+            "v0_src_contrast": 20,
+            "v0_src_bound_contrast": 21,
+            "v1_no_shift": 26,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ExportFixture(Path(temporary))
+            config = fixture.config()
+            for name in ("variants", "seeds", "generalization"):
+                config.pop(name)
+            result = run_experiment(config)
+            self.assertEqual({p.name for p in (result / "models").iterdir()}, set(expected))
+            self.assertFalse((result / "generalization").exists())
+            for name, feature_count in expected.items():
+                folder = result / "models" / name
+                self.assertEqual([p.name for p in folder.iterdir()], ["seed_0"])
+                schema = json.loads((folder / "seed_0/schema.json").read_text())
+                self.assertEqual(len(schema["features"]), feature_count)
+                self.assertEqual(schema["seed"], 0)
+                self.assertTrue((folder / "seed_0/model.txt").is_file())
+            metadata = json.loads((result / "run.json").read_text())
+            self.assertEqual(metadata["status"], "complete")
+            self.assertEqual(metadata["config"]["variants"].split(","), list(expected))
+
     def test_notebook_object_without_py_file_does_not_block_training(self):
         import model_ablation
         original_hash = model_ablation._hash

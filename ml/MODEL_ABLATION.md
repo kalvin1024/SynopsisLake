@@ -9,7 +9,9 @@
 1. 在 **自己的 Users Git folder** 切換至 `experiments/model-ablation` 並 Pull。
 2. 打開 `ml/notebooks/06_model_v1`，連接有權限使用的 Compute。
 3. 先執行套件安裝與設定 cells，確認 widgets。若舊 notebook 已有 widgets，舊值可能保留，請重新核對。
-4. 填好路徑，再從「檢查計畫」往下執行。先確認 model fits 顯示 2。
+4. 填好路徑，再從 **Review the training plan** 往下執行。先確認 model fits 顯示 5。
+   Notebook 內的標題、說明與執行訊息已全部改為英文。
+   Databricks 會保留舊 widget 值；若 `variants` 仍是 `v0,v1`，請換成下表的五版本字串。
 
 | Widget | 第一次設定 |
 |---|---|
@@ -19,7 +21,7 @@
 | `dataset` | `authors_range` |
 | `output_root` | 個人結果目錄，預設 `/Workspace/Users/<帳號>/synopsislake-results` |
 | `experiment` | 個人 MLflow experiment，預設 `/Users/<帳號>/synopsislake-model-ablation` |
-| `variants` | `v0,v1` |
+| `variants` | `v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift` |
 | `seeds` | `0` |
 | `epsilons` / `delta` | `0.25` / `0.05` |
 | `generalization` | `false` |
@@ -50,14 +52,15 @@ Git clone 不會生成這些 logger 輸出。缺檔或權限錯誤時會停止�
 
 | 比較 | variants |
 |---|---|
-| 跑通訓練 | `v0,v1` |
+| 重現既有 v0/v1 基線 | `v0,v1` |
 | 重現主要 ablation | `v0,v1,v1_no_source,v1_no_shift` |
-| 少量來源資訊是否足夠 | `v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift` |
+| 目前預設：少量來源資訊是否足夠 | `v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift` |
 | Skewness 作用 | `v0,v0_no_skew,v1,v1_no_skew` |
 | 幾何資訊 baseline | `v0,v1,geometry_only` |
 
 `v0_src_bound` 只加 `src_bound_rel`；`v0_src_contrast` 只加 `src_edge_contrast`；第三個加兩者。
-正式比較可改 `seeds=0,1,2`，每個 variant 使用相同 split、超參數與 early-stopping 規則。
+這輪預設只跑 seed 0 的五個模型；先比較少量來源特徵和全部 7 個來源特徵。
+正式比較可改 `seeds=0,1,2`（五版本共 15 fits），每個 variant 使用相同 split、超參數與 early-stopping 規則。
 `all` 包含 10 個版本；3 seeds 為 30 fits。開啟 generalization 另外增加 12 fits。
 `generalization=true` 會跑 high merge rate→low 與 west→east，calibration 來自評估側；不能宣稱是不需目標資料的轉移。
 

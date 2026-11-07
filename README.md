@@ -4,7 +4,7 @@ The is a temporary repository for SIGSPATIAL 2025 submission
 ## Personal model training and ablation
 
 Run `ml/notebooks/06_model_v1.py` from your personal Databricks Git folder.
-It starts with v0/v1 and one seed, keeps team inputs read-only, and saves models,
+It starts with five source-feature variants and one seed, keeps team inputs read-only, and saves models,
 splits, calibration thresholds and reports to a unique personal directory.
 See [the setup and ablation guide](ml/MODEL_ABLATION.md).
 

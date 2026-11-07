@@ -23,6 +23,8 @@ from features import FEATURES, check_estimates
 from features_v1 import FEATURES_V1, GROUPS, build_table_v1, check_source_estimates
 from gate_eval import PARAMS, baseline_scores, cutoff, fit, split_ids
 
+DEFAULT_VARIANTS = "v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift"
+
 
 def variants():
     def drop(names, group):
@@ -258,12 +260,14 @@ def run_experiment(config):
     """Run personal training and return a persistent unique result directory."""
     experiment_started = time.perf_counter()
     cfg = dict(config)
+    cfg.setdefault("variants", DEFAULT_VARIANTS)
     dataset = cfg["dataset"].strip()
     if not dataset or dataset in (".", "..") or "/" in dataset or "\\" in dataset:
         raise ValueError("dataset must be a single directory name")
     output = validate_output_root(cfg["output_root"], cfg["repo_root"], cfg["data_root"], cfg["sample_root"])
     registry = variants()
-    names = list(registry) if cfg.get("variants", "v0,v1") == "all" else [v.strip() for v in cfg.get("variants", "v0,v1").split(",")]
+    selected_variants = cfg.get("variants", DEFAULT_VARIANTS)
+    names = list(registry) if selected_variants == "all" else [v.strip() for v in selected_variants.split(",")]
     if not names or len(names) != len(set(names)) or set(names) - registry.keys():
         raise ValueError(f"Invalid variants; choose from {list(registry)}")
     seeds = [int(v.strip()) for v in str(cfg.get("seeds", "0")).split(",")]
