@@ -1,5 +1,8 @@
 # 個人訓練與 ablation
 
+若要從完整 v1 移除個別來源特徵，請改用新增的
+[`07_v1_feature_ablation`](V1_FEATURE_ABLATION.md)。下方保留 notebook 06 的執行說明。
+
 使用分支 `experiments/model-ablation` 的 `ml/notebooks/06_model_v1.py`。
 這是手動 Databricks 訓練流程，不需要 GitHub Actions、PR 或 `DATABRICKS_TOKEN`。
 不會呼叫部署、建立 cluster 或執行 raw-data query。
