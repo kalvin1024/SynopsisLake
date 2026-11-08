@@ -134,21 +134,16 @@ python -m unittest discover -s ml/tests -v
 ```bash
 REPO_ROOT="$PWD" DATA_ROOT=/path/to/data/ml SAMPLE_ROOT=/path/to/output/ml \
 OUTPUT_ROOT=/tmp/my-ablation-results DATASET=authors_range \
-VARIANTS=v0,v1 SEEDS=0 MLFLOW_ENABLED=false \
+VARIANTS=v0,v1 SEEDS=0 BASELINE_RUN=none MLFLOW_ENABLED=false \
 python ml/notebooks/06_model_v1.py
 ```
 
-本次以 160 個合成 query、兩個 sources、兩個 merged resolutions 做正確性驗證；不當成研究結果。
-測試實際訓練／重載模型、門檻隔離、ties、零接受風險、單一類別 AUC、split 與寫入保護。
-完整 notebook 也以小資料跑過全部 10 variants 加 4 個 generalization fits。
-尚未宣稱已在你的 Databricks、團隊正式資料或 MLflow 執行成功。
+本機 27 項測試全部通過。測試使用 160 個合成 query、兩個 sources、兩個 merged resolutions，
+實際訓練／重載模型，驗證 calibration 門檻隔離、ties、零接受風險、單一類別 AUC、split、
+寫入保護與相容模型重用。這些合成資料只供正確性驗證，不當成研究結果。
+兩份 notebook 的本機入口也已完成小資料訓練與重用流程驗證。
 
-## 上週 main 的紅叉
-
-`a42efb6` 的 merge 已成功，並且個人 fork 與團隊 main 一致，不需要重做 merge。
-[Actions run](https://github.com/kywang0906/SynopsisLake/actions/runs/42024731947) 中 Maven package 成功；
-`Verify Databricks auth` 回傳 HTTP 401，後續上傳、deploy、job run 都 skipped。
-這是 GitHub→Databricks 認證問題，與刪除個人 Git folder 無關。
-
-手動訓練不需要修該 workflow。要啟用自動部署才需要另行處理核准的 CI 憑證／權限；本分支沒有重跑、部署或修改 secrets。
-`experiments/model-ablation` 不在現有自動 push workflow 的分支名單中。
+Notebook 06 與 07 已由使用者在團隊 Databricks 的既有 `authors_range` 資料上手動執行完成，
+並匯出三個 seeds 的 CSV 與執行紀錄進行分析。這是手動執行驗證，不代表自動部署或 CI 已驗證。
+目前結果仍有 test 違規率超過 5% 的配置，不能宣稱穩定達成品質目標。
+這兩份 notebook 沒有執行 raw-data fallback，也沒有量測逐查詢端到端延遲或系統加速比。
