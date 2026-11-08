@@ -81,6 +81,7 @@ volume, repo, seed = get("volume"), get("repo_root"), int(get("seed"))
 data_root, sample_root = get("data_root"), get("sample_root")
 sys.path.insert(0, os.path.join(repo, "ml"))
 from features import FEATURES, build_table, check_estimates  # noqa: E402
+from gate_artifacts import write_gate_artifacts  # noqa: E402
 
 mlflow.set_experiment(get("experiment"))
 DATASETS = [d.strip() for d in get("datasets").split(",") if d.strip()]
@@ -161,6 +162,8 @@ for ds in DATASETS:
         with tempfile.TemporaryDirectory() as tmp:
             model.booster_.save_model(os.path.join(tmp, "model.txt"))      # LightGBM text format (DEC9)
             importance.to_csv(os.path.join(tmp, "importance.csv"), index=False)
+            # cutoffs.csv (per merge rate), model.properties, gate_report.csv: what the Java gate needs (ml/gate_artifacts.py)
+            write_gate_artifacts(model, FEATURES, df, tmp, seed)
             mlflow.log_artifacts(tmp)
 
     report_dir = f"{sample_root}/{ds}/report"                          # read by notebook 04 and CI

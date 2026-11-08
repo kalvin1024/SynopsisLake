@@ -14,8 +14,9 @@ public class ApproxAnswer {
 	/** The cutoff the score was compared with. */
 	public final double cutoff;
 	/**
-	 * Estimated relative error of the answer: the predictor's estimate when the answer is from the synopsis and
-	 * the predictor outputs relative errors (learned models), 0 for a raw answer, NaN otherwise.
+	 * Estimated relative error of the answer: the predictor's estimate whenever the answer is the synopsis
+	 * estimate (including a rejected query when no raw data is read) and the predictor outputs relative errors
+	 * (learned models); 0 for an exact raw answer; NaN for Skewness-Align, whose score is not a relative error.
 	 */
 	public final double estimatedRelError;
 	public final long gateNanos;

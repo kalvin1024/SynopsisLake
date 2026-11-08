@@ -24,3 +24,7 @@ The data and query: https://drive.google.com/drive/folders/1QxHoaMPPadQNXg8pZBb7
 The path to the file: 
 
 /src/main/java/sigspatial25/*
+
+## Learned error predictor
+
+A trained LightGBM model can replace the Skewness-Align score to decide whether to answer from a merged synopsis or the raw data. See [ml/README.md](ml/README.md).

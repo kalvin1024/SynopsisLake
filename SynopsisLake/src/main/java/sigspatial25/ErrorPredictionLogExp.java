@@ -284,6 +284,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		return out;
 	}
 
+	/** An unset job parameter arrives as an empty string. */
+	private static String emptyToNull(String s) {
+		return s.isEmpty() ? null : s;
+	}
+
 	public static void main(String[] args) throws IOException {
 		String dataDir = "../range_query/";
 		int numFile = 4;
@@ -318,12 +323,12 @@ public class ErrorPredictionLogExp extends CountHistExp {
 			} else if (args[i].equals("-reproduceAuthors")) {
 				reproduceAuthors = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-modelPath")) {
-				modelPath = args[++i];
+				modelPath = emptyToNull(args[++i]);
 			} else if (args[i].equals("-gate")) {
 				gateWanted = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-cutoffs")) {
-				gate.cutoffsPath = args[++i];
-				gateWanted = true;
+				gate.cutoffsPath = emptyToNull(args[++i]);
+				gateWanted = gate.cutoffsPath != null;
 			} else if (args[i].equals("-cutoff")) {
 				gate.cutoff = Double.valueOf(args[++i]);
 				gateWanted = true;

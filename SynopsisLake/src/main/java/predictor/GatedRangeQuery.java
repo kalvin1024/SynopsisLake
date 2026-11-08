@@ -41,7 +41,9 @@ public class GatedRangeQuery {
 					scoreIsRelativeError ? score : Double.NaN, t1 - t0, t2 - t1, 0);
 		}
 		if (raw == null) {
-			return new ApproxAnswer(estimate, estimate, false, score, cutoff, Double.NaN, t1 - t0, t2 - t1, 0);
+			// the answer is still the synopsis estimate, so its estimated error is the predictor's
+			return new ApproxAnswer(estimate, estimate, false, score, cutoff,
+					scoreIsRelativeError ? score : Double.NaN, t1 - t0, t2 - t1, 0);
 		}
 		long t3 = System.nanoTime();
 		double exact = raw.count(minLon, maxLon, minLat, maxLat);

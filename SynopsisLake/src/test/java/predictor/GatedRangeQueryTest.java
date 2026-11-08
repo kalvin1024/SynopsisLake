@@ -80,7 +80,7 @@ public class GatedRangeQueryTest {
 		ApproxAnswer a = g.answer(0, 4, 0, 4);
 		assertFalse(a.fromSynopsis);
 		assertEquals(a.synopsisEstimate, a.answer, 0);
-		assertTrue(Double.isNaN(a.estimatedRelError));
+		assertEquals(0.4, a.estimatedRelError, 1e-12); // the answer is the synopsis estimate: its error estimate
 	}
 
 	@Test
@@ -131,6 +131,14 @@ public class GatedRangeQueryTest {
 		assertEquals(0.7, PredictorFactory.cutoffs(null, 0.7, null, null, withProps).forMergeRate(1.0), 0);
 		assertEquals(null, PredictorFactory.cutoffs(null, null, null, null, new SkewnessAlignPredictor()));
 		assertTrue(PredictorFactory.predictor(null, null) instanceof SkewnessAlignPredictor);
+	}
+
+	@Test
+	public void infiniteGateCutoffInPropertiesIsUnderstood() throws IOException {
+		Properties p = new Properties();
+		p.setProperty(LearnedErrorPredictor.GATE_CUTOFF, "-inf");
+		LearnedErrorPredictor lp = new LearnedErrorPredictor(LightGBMModel.fromString(modelText()), p);
+		assertFalse(lp.getGate().useSynopsis(0.0));
 	}
 
 	private static String modelText() {

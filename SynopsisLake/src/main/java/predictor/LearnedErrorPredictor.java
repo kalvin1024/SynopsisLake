@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
 import java.util.Properties;
 
 /**
@@ -36,7 +37,7 @@ public class LearnedErrorPredictor implements ErrorPredictor {
 		}
 		this.logLabel = transform.equals("log");
 		String c = config.getProperty(GATE_CUTOFF);
-		this.cutoff = c == null ? null : Double.valueOf(c.trim());
+		this.cutoff = c == null ? null : Double.valueOf(CutoffTable.parseNumber(c));
 	}
 
 	/** Loads model.txt and, if present, model.properties from the same folder. */
@@ -62,6 +63,12 @@ public class LearnedErrorPredictor implements ErrorPredictor {
 	/** Gate built from gate.cutoff, or null when the properties give none. */
 	public ErrorGate getGate() {
 		return cutoff == null ? null : new ErrorGate(cutoff);
+	}
+
+	@Override
+	public boolean needsBeta() {
+		return Arrays.asList(model.getFeatureNames()).contains("skew_pred")
+				|| Arrays.asList(model.getFeatureNames()).contains("log_alpha");
 	}
 
 	@Override

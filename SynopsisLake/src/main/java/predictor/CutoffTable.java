@@ -113,7 +113,8 @@ public class CutoffTable {
 		return Math.abs(a - b) <= RATE_TOLERANCE * Math.max(1.0, Math.abs(b));
 	}
 
-	private static double parseNumber(String s) {
+	/** A number, or inf / -inf. */
+	static double parseNumber(String s) {
 		s = s.trim().toLowerCase();
 		if (s.equals("inf") || s.equals("+inf")) {
 			return Double.POSITIVE_INFINITY;

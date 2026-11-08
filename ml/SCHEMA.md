@@ -143,8 +143,8 @@ ApproxAnswer a = q.answer(minLon, maxLon, minLat, maxLat);   // a.answer, a.from
 | `eps`, `delta` | optional; rows are picked by `-eps` / `-delta` |
 
 A merge rate with no row uses `-cutoff` or `gate.cutoff` from `model.properties`, and is an error if neither is set.
-`estimatedRelError` is the model's estimate when the answer is from the synopsis (0 for raw, NaN for Skewness-Align,
-whose score is not a relative error).
+`estimatedRelError` is the model's estimate whenever the answer is the synopsis estimate (also for a rejected query
+when no raw data is read), 0 for an exact raw answer, and NaN for Skewness-Align, whose score is not a relative error.
 
 `ErrorPredictionLogExp` runs the gate for every merge rate and query when given `-cutoffs <csv>` or `-cutoff <x>`
 (or `-gate true` to use `gate.cutoff`):
@@ -159,3 +159,46 @@ whose score is not a relative error).
 It writes `gated.csv`, one row per (merge rate, query): `method,mergeRate,qId,gt,answer,fromSynopsis,errorScore,
 cutoff,estRelErr,relErr,gateNs,synNs,rawNs`. `relErr` is the error of `answer` (0 for a raw answer), so the share of
 rows with `fromSynopsis` and `relErr > eps` is the observed violation, and the `*Ns` columns give the latency.
+
+## Answering from saved synopses (`sigspatial25.ApproxQueryExp`)
+
+Gives approximate answers with estimated relative errors from a run folder alone (`src_*.txt`, `arm_*.txt`), a
+model and a cutoff, with no raw data. `predictor.SynopsisStore` loads the folder; the answers match the logger's
+`rows.csv` exactly (est, `learnedErr` and `predErr` checked on the authors dataset).
+
+```
+java -cp SynopsisLake.jar:commons-math3.jar sigspatial25.ApproxQueryExp \
+  -runDir out/ml/authors_range -queryFile queries.csv -outFile out/approx.csv \
+  -modelPath model.txt -cutoffs cutoffs.csv -eps 0.10 -delta 0.05 -mergeRate 0.5
+```
+
+`queries.csv` has `minLon,maxLon,minLat,maxLat[,exact]` per line. `approx.csv` has
+`qId,mergeRate,answer,fromSynopsis,estRelError,errorScore,cutoff,gateNs,synNs,rawNs,exact,relErr` (`exact` and `relErr`
+are empty when the queries have no count). `python ml/to_parquet.py out/approx.csv` converts it to Parquet.
+
+| flag | default | |
+|---|---|---|
+| `-runDir`, `-queryFile` | required | |
+| `-outFile` | `approx.csv` | |
+| `-modelPath`, `-propsPath` | none | no model = Skewness-Align; `model.properties` next to the model is read |
+| `-cutoffs`, `-cutoff` | none | else `gate.cutoff` from the properties; `-eps` / `-delta` pick rows of `cutoffs.csv` |
+| `-mergeRate` | | answer from the nearest merged synopsis |
+| `-plan true`, `-planQueryFile` | | instead of `-mergeRate`: pick the smallest merge rate that meets eps/delta on queries with exact counts (`predictor.MergeRatePlanner`); table in `<outFile>.plan.csv`; `-minCoverage` (0.01), `-minExact` (10) |
+| `-rawFallback true`, `-dataDir`, `-numFile` | false | read the raw points for rejected queries |
+
+With `-plan true` and no qualifying rate the program says so and exits with status 2 (or answers everything from the
+raw data when `-rawFallback true`). Plan with queries that were not used to calibrate the cutoffs; the violation is
+optimistic otherwise.
+
+## Gate artifacts from the training side (`ml/gate_artifacts.py`)
+
+`write_gate_artifacts(model, FEATURES, df, out_dir, seed)` calibrates one cutoff per merge rate on the calibration
+queries (same 50/20/30 split as notebook 02) for each eps, and writes `cutoffs.csv`, `model.properties`
+(`label.transform`, pooled `gate.cutoff`) and `gate_report.csv` (held-out coverage and violation per rate). Notebook 02
+now calls it and logs the three files to MLflow next to `model.txt`. For any saved model:
+
+```
+python ml/gate_artifacts.py out/ml/authors_range data/ml/authors_range model.txt out/gate --seed 0
+```
+
+Put `model.txt` and `model.properties` in one folder and pass `cutoffs.csv` with `-cutoffs`.
