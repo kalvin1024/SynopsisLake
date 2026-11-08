@@ -119,3 +119,43 @@ python ml/check_java_parity.py out/ml/authors_range data/ml/authors_range model.
 
 Features differ from numpy in the last bit, so a model that has split on rounding noise sends a few rows
 (0.1% for the v0 model) down another path; rank and AUC are unchanged.
+
+## Query path: gated answers (`predictor.GatedRangeQuery`)
+
+Answers a range count from the merged synopsis when the predictor trusts it, from the raw data otherwise, and
+returns the answer with its estimated relative error. Training and calibration stay in Databricks; the Java side
+takes three inputs: a model (or none for Skewness-Align), a cutoff, and optionally the raw data.
+
+```java
+ErrorPredictor p = PredictorFactory.predictor("model.txt", null);              // null model = Skewness-Align
+CutoffTable cutoffs = PredictorFactory.cutoffs("cutoffs.csv", null, 0.10, 0.05, p);
+GatedRangeQuery q = new GatedRangeQuery(new SynopsisContext(merged, sources, mergeRate, beta), p,
+        cutoffs.forMergeRate(mergeRate), PointScanCounter.fromFiles(dataFiles));   // raw counter may be null
+ApproxAnswer a = q.answer(minLon, maxLon, minLat, maxLat);   // a.answer, a.fromSynopsis, a.estimatedRelError, ...
+```
+
+`cutoffs.csv` (one cutoff per merge rate, from `gate_eval.cutoff` on calibration queries): header, then rows.
+
+| column | |
+|---|---|
+| `mergeRate` | the merge rate the cutoff is for; without this column the file has one row for every rate |
+| `cutoff` | number, or `inf` / `-inf` (`-inf` = always read the raw data at that rate) |
+| `eps`, `delta` | optional; rows are picked by `-eps` / `-delta` |
+
+A merge rate with no row uses `-cutoff` or `gate.cutoff` from `model.properties`, and is an error if neither is set.
+`estimatedRelError` is the model's estimate when the answer is from the synopsis (0 for raw, NaN for Skewness-Align,
+whose score is not a relative error).
+
+`ErrorPredictionLogExp` runs the gate for every merge rate and query when given `-cutoffs <csv>` or `-cutoff <x>`
+(or `-gate true` to use `gate.cutoff`):
+
+| flag | default | |
+|---|---|---|
+| `-cutoffs`, `-cutoff` | none | per-merge-rate file, single value |
+| `-eps`, `-delta` | none | pick rows of a `cutoffs.csv` that has several |
+| `-gatePredictor` | `learned` if `-modelPath` is given, else `skew` | `skew` gates with Skewness-Align even when a model is given |
+| `-rawFallback` | false | read the raw points (the numFile data files) for queries sent to the raw data; false only records the decision |
+
+It writes `gated.csv`, one row per (merge rate, query): `method,mergeRate,qId,gt,answer,fromSynopsis,errorScore,
+cutoff,estRelErr,relErr,gateNs,synNs,rawNs`. `relErr` is the error of `answer` (0 for a raw answer), so the share of
+rows with `fromSynopsis` and `relErr > eps` is the observed violation, and the `*Ns` columns give the latency.

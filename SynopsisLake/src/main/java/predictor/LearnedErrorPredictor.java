@@ -65,6 +65,11 @@ public class LearnedErrorPredictor implements ErrorPredictor {
 	}
 
 	@Override
+	public boolean scoreIsRelativeError() {
+		return true;
+	}
+
+	@Override
 	public QueryErrorEstimator bind(final SynopsisContext synopsis) {
 		return (minLon, maxLon, minLat, maxLat) -> {
 			QueryFeatures q = new QueryFeatures(synopsis, minLon, maxLon, minLat, maxLat);
