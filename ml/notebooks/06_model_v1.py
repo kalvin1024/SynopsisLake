@@ -3,249 +3,269 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # dependencies = [
-#   "lightgbm==4.6.0",
+#   "lightgbm",
 # ]
 # ///
 # MAGIC %md
-# MAGIC # 06 - Source-feature subset ablation
+# MAGIC # 06 · Model v1: new inputs, ablations, generalization
 # MAGIC
-# MAGIC The v0/v1 baseline comparison has already been reproduced. This experiment asks whether
-# MAGIC **one or two source-level features recover most of the benefit of all seven source features**.
-# MAGIC It reuses the feature extraction, LightGBM training, query splits, and calibration logic in
-# MAGIC `features_v1.py` and `gate_eval.py`.
+# MAGIC Builds on model v0 (notebook 02) with the same label, splits and gate, and asks three questions:
 # MAGIC
-# MAGIC | Default variant | Features | Purpose |
-# MAGIC | --- | ---: | --- |
-# MAGIC | `v0` | 19 | Baseline without the additional source features |
-# MAGIC | `v0_src_bound` | 20 | Add only `src_bound_rel` |
-# MAGIC | `v0_src_contrast` | 20 | Add only `src_edge_contrast` |
-# MAGIC | `v0_src_bound_contrast` | 21 | Add both features |
-# MAGIC | `v1_no_shift` | 26 | Reference using all seven additional source features |
+# MAGIC 1. **Do source-level inputs help?** v1 adds 9 inputs to v0's 19 (`ml/features_v1.py`):
+# MAGIC     * 7 that describe the query on each per-file source histogram
+# MAGIC     * 2 that measure how far the merged answer moved away from the no-merge answer (`merge_shift`)
 # MAGIC
-# MAGIC All five variants exclude merge-shift features. This continuation reuses the completed **seed 0**
-# MAGIC run, trains **seeds 1 and 2**, and compares all three seeds. It performs **10 new model fits**.
-# MAGIC GitHub Actions and `DATABRICKS_TOKEN` are not required.
+# MAGIC     All of them come from synopses only.
+# MAGIC 2. **Which inputs matter?** Ablations drop one input group at a time: Skewness-Align, source-level, merge
+# MAGIC    shift; there is also a geometry-only model.
+# MAGIC 3. **Does it transfer?**
+# MAGIC     * Train on high merge rates (40% and up), test on low ones.
+# MAGIC     * Train on the western half of the map, test on the eastern half.
 # MAGIC
-# MAGIC Inputs are read-only. Each run creates a new personal output directory and, by default, snapshots
-# MAGIC the required inputs with SHA-256 fingerprints. Models, feature order, splits, and cutoffs are saved.
-# MAGIC This is an **offline answer-quality experiment**. It does not execute raw-data fallback or measure
-# MAGIC end-to-end query latency. Using fewer model inputs does not itself reduce source-histogram I/O.
-# MAGIC A previous result is combined only after checking the input fingerprints, feature/training code,
-# MAGIC parameters, package versions, and feature order. A mismatch stops the comparison.
+# MAGIC     Each is compared with a model trained on everything and tested on the same queries.
+# MAGIC
+# MAGIC **How to read the results.** The gate is evaluated *per merge rate*: one cutoff per merged synopsis, set on
+# MAGIC calibration queries for at most 5% violations, then averaged over the 18 rates. That matches deployment, where a
+# MAGIC query is answered from one merged synopsis. `coverage_per_rate` is the share of test queries the gate answers from
+# MAGIC the synopsis. The pooled numbers (one cutoff over all rates, as in notebook 02) are kept for comparison.
+# MAGIC
+# MAGIC **Runtime:** about 33 model fits (7 variants × 3 seeds, plus 2 tests × 2 settings × 3 seeds). Use the `seeds`,
+# MAGIC `variants` and `generalization` widgets to run less.
+# MAGIC
+# MAGIC Locally: `VOLUME=… REPO_ROOT=… DATA_ROOT=… SAMPLE_ROOT=… DATASET=… python ml/notebooks/06_model_v1.py`.
 
 # COMMAND ----------
 
-# MAGIC %pip install lightgbm==4.6.0
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Settings
-# MAGIC
-# MAGIC Run the next cell to create widgets, then check their values before continuing.
-# MAGIC
-# MAGIC * `repo_root`: the full path to your personal Git folder.
-# MAGIC * `data_root`: the root containing `<dataset>/queries-Ans.txt` and `queries-meta.csv`.
-# MAGIC * `sample_root`: the logger-output root containing `<dataset>/rows.csv`, `arm_*.txt`, and `src_*.txt`.
-# MAGIC * `output_root`: a personal results directory outside the repo, input directories, and `/Workspace/Shared`.
-# MAGIC * `experiment`: a personal MLflow path, such as `/Users/<your-account>/synopsislake-model-ablation`.
-# MAGIC * Use `seeds=1,2` and `generalization=false` to extend the completed seed 0 study.
-# MAGIC * `baseline_run=auto` finds the single compatible completed seed 0 run in `output_root`.
-# MAGIC   If more than one matches, enter the exact seed 0 run directory instead. Set it to `none` to run
-# MAGIC   a separate experiment without combining earlier results.
-# MAGIC * `copy_inputs=true` snapshots the inputs. Missing files or permissions must be resolved before training.
-# MAGIC * Set `mlflow_enabled=false` to save files without MLflow. Requested MLflow failures are not silently ignored.
-# MAGIC
-# MAGIC **Existing Databricks widgets retain their previous values after a Git pull.** Change `seeds`
-# MAGIC from `0` to `1,2`. If `variants` is not already the following list, update that field too:
-# MAGIC
-# MAGIC ```text
-# MAGIC v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift
-# MAGIC ```
-# MAGIC
-# MAGIC Other settings and personal paths can stay as they were. The plan below should report **10 model fits**
-# MAGIC and identify the previous seed 0 directory. It stops before training if the comparison is incompatible.
+# MAGIC %pip install lightgbm
 
 # COMMAND ----------
 
 import os
-from pathlib import Path
 import sys
 
 VOL = "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake"
-SOURCE_STUDY_VARIANTS = (
-    "v0,v0_src_bound,v0_src_contrast,v0_src_bound_contrast,v1_no_shift"
-)
 
 
 def _repo_root():
+    """Folder that holds ml/ (this notebook is …/ml/notebooks/06_model_v1)."""
     try:
-        name = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
-        root = name.split("/ml/notebooks/")[0]
+        nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()  # noqa: F821
+        root = nb.split("/ml/notebooks/")[0]
         return root if root.startswith("/Workspace/") else "/Workspace" + root
     except Exception:
         try:
-            return str(Path(__file__).resolve().parents[2])
+            return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         except NameError:
             return os.getcwd()
 
 
-def _defaults():
-    repo = _repo_root()
-    output, experiment = "", ""
-    parts = Path(repo).parts
-    if "Users" in parts and len(parts) > parts.index("Users") + 1:
-        i = parts.index("Users") + 1
-        home = Path(*parts[:i + 1])
-        output = str(home / "synopsislake-results")
-        experiment = f"/Users/{parts[i]}/synopsislake-model-ablation"
-    volume = os.environ.get("VOLUME", VOL)
-    return dict(repo_root=repo, data_root=volume + "/data/ml",
-                sample_root=volume + "/output/ml", output_root=output,
-                dataset="authors_range", seeds="1,2", variants=SOURCE_STUDY_VARIANTS, generalization="false",
-                experiment=experiment, mlflow_enabled="true", copy_inputs="true",
-                epsilons="0.25", delta="0.05", max_trees="4000", num_threads="2", baseline_run="auto")
+def _defaults(volume):
+    return {"volume": volume, "repo_root": _repo_root(), "data_root": volume + "/data/ml",
+            "sample_root": volume + "/output/ml", "dataset": "authors_range", "seeds": "0,1,2",
+            "variants": "all", "generalization": "true", "experiment": "/Shared/synopsislake-error-predictor"}
 
 
-DEFAULTS = _defaults()
 try:
-    for key, value in DEFAULTS.items():
-        dbutils.widgets.text(key, value)  # noqa: F821
+    for k, v in _defaults(VOL).items():
+        dbutils.widgets.text(k, v)  # noqa: F821
     get = dbutils.widgets.get  # noqa: F821
 except NameError:
+    _env_defaults = _defaults(os.environ.get("VOLUME", VOL))
+
     def get(name):
-        return os.environ.get(name.upper(), DEFAULTS[name])
+        return os.environ.get(name.upper(), _env_defaults[name])
+
+
+def show(df):
+    try:
+        display(df)  # noqa: F821
+    except NameError:
+        print(df.to_string())
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Review the training plan
-# MAGIC
-# MAGIC The continuation uses five variants and two new seeds: **10 fits**. The completed seed 0 models
-# MAGIC are reused, not retrained. The comparison contains the same five variants across seeds 0, 1, and 2.
-# MAGIC An independent run can be configured with `baseline_run=none`; it will not create a three-seed comparison.
-# MAGIC Enabling generalization adds four fits per seed and is not part of the three-seed ablation comparison.
-# MAGIC All variants share the same feature table, query split, LightGBM parameters, and early-stopping rules.
+import time  # noqa: E402
+import warnings  # noqa: E402
 
-# COMMAND ----------
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
 
-import importlib
+warnings.filterwarnings("ignore", message=".*eval_set.*")   # newer LightGBM renamed the argument; still works
+sys.path.insert(0, os.path.join(get("repo_root"), "ml"))
+from features import FEATURES, check_estimates  # noqa: E402
+from features_v1 import FEATURES_V1, GROUPS, build_table_v1, check_source_estimates  # noqa: E402
+from gate_eval import PARAMS, run  # noqa: E402
 
-repo = Path(get("repo_root")).resolve()
-if not (repo / "ml/model_ablation.py").is_file():
-    raise FileNotFoundError("Check repo_root and switch to the experiments/model-ablation branch")
-sys.path.insert(0, str(repo / "ml"))
-# A session may have cached code before a branch switch or a local edit.
-# Re-import this small module set from the explicitly selected Git folder.
-for module_name in ("model_ablation", "compare_ablation_runs", "features_v1", "features", "gate_eval"):
-    sys.modules.pop(module_name, None)
-importlib.invalidate_caches()
-from model_ablation import run_experiment, variants  # noqa: E402
-from compare_ablation_runs import combine_runs, find_compatible_baseline  # noqa: E402
-
-CONFIG = {key: get(key) for key in DEFAULTS}
-requested = list(variants()) if CONFIG["variants"] == "all" else [v.strip() for v in CONFIG["variants"].split(",")]
-if set(requested) - variants().keys():
-    raise ValueError(f"Unknown variants; available choices: {list(variants())}")
-seeds = [int(s.strip()) for s in CONFIG["seeds"].split(",")]
-fits = len(requested) * len(seeds)
-if CONFIG["generalization"].lower() == "true":
-    fits += 4 * len(seeds)
-print("repo:", repo)
-print("variants:", requested, "seeds:", seeds, "model fits:", fits)
-print("read-only data:", CONFIG["data_root"])
-print("read-only logger exports:", CONFIG["sample_root"])
-print("personal output root:", CONFIG["output_root"] or "Not set; enter a personal directory first")
-print("MLflow experiment:", CONFIG["experiment"])
-baseline = None
-if CONFIG["baseline_run"].strip().lower() != "none":
-    baseline = find_compatible_baseline(CONFIG)
-    print("Compatible seed 0 run:", baseline)
-else:
-    print("Independent run: no prior results will be combined.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Train and evaluate
-# MAGIC
-# MAGIC Missing volumes, files, or permissions produce an error with the relevant path.
-# MAGIC This run uses actual inputs; it does not substitute fabricated data or historical results.
-# MAGIC Queries with an exact count below 10 are excluded, matching the existing pipeline.
-# MAGIC Results therefore do not assess zero-count or small-count queries.
-
-# COMMAND ----------
-
-if {key: get(key) for key in DEFAULTS} != CONFIG:
-    raise ValueError("Settings changed; rerun the Review the training plan cell before training")
-result_dir = run_experiment(CONFIG)
-print("Results for this run:", result_dir)
-comparison_dir = None
-if baseline is not None:
-    comparison_summary, comparison_rates, comparison_dir = combine_runs(baseline, result_dir)
-    print("Three-seed comparison:", comparison_dir)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Read this run's results
-# MAGIC
-# MAGIC Compare each subset with `v0` and with `v1_no_shift`. A useful subset retains much of the
-# MAGIC acceptance improvement of all seven source features at a comparable observed violation rate.
-# MAGIC Higher coverage alone is not sufficient if the quality target is exceeded.
-# MAGIC
-# MAGIC * `coverage_per_rate_mean`: average acceptance after calibrating a separate gate for each merge rate.
-# MAGIC * `violation_per_rate_mean`: average risk among rates with accepted answers. **Zero acceptance has undefined risk.**
-# MAGIC * `violation_pooled_per_rate_gates_mean`: violations divided by accepted cases across the per-rate gates;
-# MAGIC   this uses different weights from the preceding average.
-# MAGIC * `gate_details.csv` contains the exact counts and cutoffs. `quality_target_met` is an observation on test data,
-# MAGIC   not a statistical guarantee. Individual rates can fail even when the average risk is below 5%.
-# MAGIC * Cutoffs use calibration data only. Do not retune them using these test outcomes.
-# MAGIC * A single seed has no between-seed standard deviation; empty `std` values are expected.
-# MAGIC * `oracle` uses true error and is an offline reference, not a deployable model.
-# MAGIC
-# MAGIC Each `models/<variant>/seed_<seed>/` directory contains `model.txt`, `schema.json`, `cutoffs.json`,
-# MAGIC `cohorts.csv`, and `test_predictions.csv`. Cutoffs are in **predicted log-error score** space, not relative-error units.
-# MAGIC `run.json` must have `status=complete` before treating the full run as completed.
-# MAGIC When a seed 0 baseline is selected, the tables below combine seeds 0, 1, and 2. The new
-# MAGIC `comparison/` directory contains per-seed rows, three-seed summaries, per-rate summaries,
-# MAGIC and a provenance manifest. The old seed 0 directory is never modified.
-# MAGIC Repeated seeds reuse queries across different splits; their standard deviation is descriptive,
-# MAGIC not a confidence interval or a statistical guarantee.
-
-# COMMAND ----------
-
-import json
-import pandas as pd
-
-summary = comparison_summary if comparison_dir else pd.read_csv(result_dir / "v1_summary.csv")
-details = comparison_rates if comparison_dir else pd.read_csv(result_dir / "gate_details.csv")
 try:
-    display(summary)  # noqa: F821
-    if comparison_dir:
-        display(details)  # noqa: F821
-    else:
-        display(details[(details.score == "learned") & (details.scope == "per_rate")])  # noqa: F821
-except NameError:
-    print(summary.to_string(index=False))
-print("Gate details:", comparison_dir / "combined_gate_details.csv" if comparison_dir else result_dir / "gate_details.csv")
-print("Run metadata:", result_dir / "run.json")
+    import mlflow
+    mlflow.set_experiment(get("experiment"))
+except Exception as e:                                         # runs without MLflow too (locally)
+    print("MLflow off:", str(e)[:80])
+    mlflow = None
+
+dataset = get("dataset")
+run_dir, data_dir = f"{get('sample_root')}/{dataset}", f"{get('data_root')}/{dataset}"
+report_dir = f"{run_dir}/report"
+os.makedirs(report_dir, exist_ok=True)
+SEEDS = [int(s) for s in get("seeds").split(",")]
+
+df = build_table_v1(run_dir, data_dir)
+queries = pd.read_csv(f"{data_dir}/queries-Ans.txt", header=None)
+df = df.merge(((queries[0] + queries[1]) / 2).rename("center_lon").rename_axis("qId").reset_index(), on="qId")
+print(f"{len(df):,} rows, {df.qId.nunique():,} queries | estimate gap {check_estimates(df):.1e} | "
+      f"no-merge estimate gap {check_source_estimates(df):.1e} | {len(FEATURES)} v0 inputs, {len(FEATURES_V1)} v1 inputs")
+
+# COMMAND ----------
+
+# MAGIC %md ## 1 · Ablations
+
+# COMMAND ----------
+
+
+def drop(features, group):
+    return [f for f in features if f not in GROUPS[group]]
+
+
+VARIANTS = {
+    "v0": FEATURES,
+    "v0_no_skew": drop(FEATURES, "skew"),
+    "v1": FEATURES_V1,
+    "v1_no_skew": drop(FEATURES_V1, "skew"),
+    "v1_no_shift": drop(FEATURES_V1, "shift"),
+    "v1_no_source": drop(FEATURES_V1, "source"),
+    "geometry_only": GROUPS["shape"] + GROUPS["merge"],
+}
+if get("variants") != "all":
+    VARIANTS = {k: VARIANTS[k] for k in get("variants").split(",")}
+
+
+def log_run(name, seed, features, res):
+    if mlflow is None:
+        return
+    with mlflow.start_run(run_name=f"v1-{dataset}-{name}-seed{seed}"):
+        mlflow.log_params({"dataset": dataset, "variant": name, "seed": seed, "n_features": len(features),
+                           "features": ",".join(features), **PARAMS})
+        for r in res.itertuples():
+            tag = f"{r.score}_eps{int(r.eps * 100)}"
+            mlflow.log_metrics({f"{tag}_auc_per_rate": r.auc_per_rate, f"{tag}_coverage_per_rate": r.coverage_per_rate,
+                                f"{tag}_violation_per_rate": r.violation_per_rate, f"{tag}_coverage_pooled": r.coverage})
+        mlflow.log_metric("best_iteration", int(res.best_iteration.iloc[0]))
+
+
+results, importances = [], []
+for name, feats in VARIANTS.items():
+    for seed in SEEDS:
+        t0 = time.time()
+        res, imp, _ = run(df, feats, seed)
+        res.insert(0, "variant", name)
+        res.insert(1, "n_features", len(feats))
+        results.append(res)
+        importances.append(imp.assign(variant=name, seed=seed))
+        log_run(name, seed, feats, res)
+        print(f"{name} seed {seed}: {time.time() - t0:.0f}s, best iteration {res.best_iteration.iloc[0]}")
+ablations = pd.concat(results, ignore_index=True)
+ablations.to_csv(f"{report_dir}/v1_ablations.csv", index=False)
+pd.concat(importances).to_csv(f"{report_dir}/v1_importance.csv", index=False)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Follow-up experiments
+# MAGIC ## 2 · Summary: mean (and spread) over seeds
 # MAGIC
-# MAGIC The combined three-seed comparison describes variability across the existing query splits. It is not
-# MAGIC a new independent dataset, and its standard deviation is not a confidence interval.
-# MAGIC The original seed 0 and new seed 1/2 runs remain separate, with a derived comparison in the new run.
+# MAGIC The learned rows show one line per variant. Baselines don't depend on the variant, so they are shown once.
+# MAGIC `oracle` uses the true error and is the ceiling.
+
+# COMMAND ----------
+
+cols = ["auc_per_rate", "coverage_per_rate", "violation_per_rate", "auc", "coverage", "violation"]
+learned = ablations[ablations.score == "learned"]
+summary = learned.groupby(["eps", "variant"])[cols].agg(["mean", "std"]).round(3)
+summary.columns = [f"{c}_{s}" for c, s in summary.columns]
+first = list(VARIANTS)[0]
+base = (ablations[(ablations.score != "learned") & (ablations.variant == first)]
+        .groupby(["eps", "score"])[cols].mean().round(3))
+show(summary.reset_index())
+show(base.reset_index())
+summary.reset_index().to_csv(f"{report_dir}/v1_summary.csv", index=False)
+
+eps = 0.25
+s = summary.reset_index()
+s = s[s.eps == eps].set_index("variant").reindex(list(VARIANTS))
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std, color="#4C78A8")
+ax.axhline(base.loc[(eps, "oracle"), "coverage_per_rate"], ls="--", color="grey", label="oracle (true error)")
+ax.axhline(base.loc[(eps, "skew_align"), "coverage_per_rate"], ls=":", color="black", label="Skewness-Align")
+ax.set_ylabel("share answered from synopsis")
+ax.set_title(f"Gate coverage at {int(eps * 100)}% error limit, at most 5% violations (per merge rate)")
+ax.legend()
+plt.xticks(rotation=20)
+plt.tight_layout()
+fig.savefig(f"{report_dir}/v1_coverage.png", dpi=150)
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3 · Generalization
 # MAGIC
-# MAGIC To reproduce the older group-level ablation, select `v0,v1,v1_no_source,v1_no_shift` explicitly.
-# MAGIC `v1_no_source` still retains merge-shift features and therefore still depends on source estimates.
+# MAGIC * `shifted`: trained only on the training side of the split, then tested on the other side.
+# MAGIC * `in_distribution`: trained on all training queries, then tested on the same test queries.
 # MAGIC
-# MAGIC After editing widgets, rerun from **Review the training plan**. Each execution creates a new result directory.
-# MAGIC This pipeline still builds the complete source-feature table before training: selecting fewer model inputs
-# MAGIC does not demonstrate reduced I/O, memory use, or query latency. Those require separate systems experiments.
+# MAGIC The gap between the two is the cost of never having seen that part of the data.
+
+# COMMAND ----------
+
+if get("generalization").lower() == "true":
+    mid = (df.center_lon.min() + df.center_lon.max()) / 2
+    tests = {"rate_high_to_low": (df.mergeRate >= 0.40, df.mergeRate < 0.40),
+             "west_to_east": (df.center_lon < mid, df.center_lon >= mid)}
+    gen = []
+    for tname, (train_side, test_side) in tests.items():
+        for seed in SEEDS:
+            for setting, train_mask in [("shifted", train_side), ("in_distribution", None)]:
+                res, _, _ = run(df, FEATURES_V1, seed, train_mask=train_mask, test_mask=test_side)
+                res.insert(0, "test", tname)
+                res.insert(1, "setting", setting)
+                gen.append(res)
+                print(tname, setting, seed, "done")
+    gen = pd.concat(gen, ignore_index=True)
+    gen.to_csv(f"{report_dir}/v1_generalization.csv", index=False)
+    g = (gen[gen.score == "learned"].groupby(["test", "eps", "setting"])
+         [["auc_per_rate", "coverage_per_rate", "violation_per_rate"]].mean().round(3))
+    show(g.reset_index())
+    print(f"west/east split at longitude {mid:.2f}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## What to look for (authors' data, from the prototype run)
 # MAGIC
-# MAGIC Optional `generalization=true` tests high-rate to low-rate and west-to-east transfer, with calibration
-# MAGIC queries from the evaluated side. Effective row cohorts are saved for every model.
+# MAGIC These numbers come from the local prototype, as means over seeds 0–2, evaluated per merge rate. Yours should be close;
+# MAGIC library versions shift them slightly.
+# MAGIC
+# MAGIC | variant | AUC | coverage at 25% | coverage at 10% |
+# MAGIC |---|---|---|---|
+# MAGIC | `v1` | 0.880 | 16.0% | 3.3% |
+# MAGIC | `v1_no_shift` (v0 + source inputs) | 0.876 | 15.8% | 2.9% |
+# MAGIC | `v1_no_skew` | 0.874 | 12.1% | 1.2% |
+# MAGIC | `v1_no_source` (v0 + merge shift) | 0.852 | 11.7% | 2.7% |
+# MAGIC | `v0` | 0.822 | 10.4% | 2.7% |
+# MAGIC | `v0_no_skew` | 0.819 | 7.8% | 1.3% |
+# MAGIC | `geometry_only` | 0.613 | 0.6% | 0.2% |
+# MAGIC | Skewness-Align alone | 0.605 | 0.2% | 0.0% |
+# MAGIC | oracle | 1.000 | 54.4% | 25.3% |
+# MAGIC
+# MAGIC * **Source-level inputs are the main gain.** AUC rises from 0.82 to 0.88, and coverage at 25% from 10% to 16%.
+# MAGIC   Merge shift adds little once the source inputs are in.
+# MAGIC * **Skewness-Align is useful as an input, though weak as a score on its own.** Removing it costs 3–4 points of
+# MAGIC   coverage.
+# MAGIC * **Geometry alone (query shape and merge rate) predicts almost nothing**, so the histogram counts carry the signal.
+# MAGIC * **Violations average 5–6%, slightly above the 5% target.** The cutoff is empirical, so a guarantee needs
+# MAGIC   conformal calibration.
+# MAGIC * **Every model except geometry-only reached the 4,000-tree cap**, so more capacity may help further.
+# MAGIC * **Generalization (v1, AUC at the 25% limit):**
+# MAGIC     * High to low merge rates: 0.81 shifted vs 0.90 in distribution. Coverage falls from 11.6% to 4.9%.
+# MAGIC     * West to east: 0.72 vs 0.89. Coverage falls from 16.7% to 2.1%. The east uses different source files and
+# MAGIC       resolutions (32 and 48 cells) from the west (40 and 56), so this tests a change of geography and of synopsis
+# MAGIC       together.
+# MAGIC     * In both tests the shifted model still ranks better than Skewness-Align on the same queries (0.61–0.62).
