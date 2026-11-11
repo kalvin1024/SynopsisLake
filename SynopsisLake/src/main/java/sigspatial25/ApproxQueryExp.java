@@ -40,6 +40,9 @@ import predictor.SynopsisStore;
  *                         -planQueryFile (queries with exact counts, ideally not the ones the cutoffs were
  *                         calibrated on); the table is written to <outFile>.plan.csv. -minCoverage (0.01) and
  *                         -minExact (10) tune it.
+ *   -mode exact|approx|gated   exact: answer every query from the raw data (-dataDir, -numFile, -queryFile only;
+ *                         no run folder, model or cutoff needed). approx: synopsis only. gated: synopsis, raw for
+ *                         rejected queries (same as -rawFallback true). Default: approx, or gated with -rawFallback.
  *   -rawFallback true     read the raw points (-dataDir with 0..numFile-1.csv, -numFile) for queries the gate
  *                         rejects; otherwise those queries return the synopsis estimate with fromSynopsis=false
  */
@@ -51,6 +54,7 @@ public class ApproxQueryExp {
 		Double cutoff = null, mergeRate = null;
 		double eps = 0.10, delta = 0.05, minCoverage = 0.01, minExact = 10;
 		boolean plan = false, rawFallback = false;
+		String mode = null;
 		int numFile = 4;
 		for (int i = 0; i < args.length; i++) {
 			String a = args[i];
@@ -76,11 +80,24 @@ public class ApproxQueryExp {
 			case "-planQueryFile": planQueryFile = v; break;
 			case "-minCoverage": minCoverage = Double.parseDouble(v); break;
 			case "-minExact": minExact = Double.parseDouble(v); break;
+			case "-mode": mode = v; break;
 			case "-rawFallback": rawFallback = Boolean.parseBoolean(v); break;
 			case "-dataDir": dataDir = v; break;
 			case "-numFile": numFile = Integer.parseInt(v); break;
 			default: throw new IllegalArgumentException("unknown argument " + a);
 			}
+		}
+		if (mode != null && !mode.equals("exact") && !mode.equals("approx") && !mode.equals("gated")) {
+			throw new IllegalArgumentException("-mode must be exact, approx or gated");
+		}
+		if ("gated".equals(mode)) {
+			rawFallback = true;
+		} else if ("approx".equals(mode)) {
+			rawFallback = false;
+		}
+		if ("exact".equals(mode)) {
+			runExact(queryFile, outFile, dataDir, numFile);
+			return;
 		}
 		if (runDir == null || queryFile == null) {
 			throw new IllegalArgumentException("-runDir and -queryFile are required");
@@ -165,6 +182,41 @@ public class ApproxQueryExp {
 		}
 		System.out.println(String.format(Locale.ROOT, "%d queries, %.1f%% answered from the synopsis; wrote %s",
 				queries.size(), 100.0 * fromSynopsis / Math.max(1, queries.size()), outFile));
+	}
+
+	private static void runExact(String queryFile, String outFile, String dataDir, int numFile) throws IOException {
+		if (queryFile == null || dataDir == null) {
+			throw new IllegalArgumentException("-mode exact needs -queryFile and -dataDir");
+		}
+		List<String> files = new ArrayList<String>();
+		String d = dataDir.endsWith("/") ? dataDir : dataDir + "/";
+		for (int f = 0; f < numFile; f++) {
+			files.add(d + f + ".csv");
+		}
+		GatedRangeQuery gate = GatedRangeQuery.exact(PointScanCounter.fromFiles(files));
+		File parent = new File(outFile).getAbsoluteFile().getParentFile();
+		if (parent != null) {
+			parent.mkdirs();
+		}
+		List<double[]> queries = QueryFile.load(queryFile);
+		try (FileWriter out = new FileWriter(outFile)) {
+			out.write("qId,mergeRate,answer,fromSynopsis,estRelError,errorScore,cutoff,gateNs,synNs,rawNs,exact,relErr\n");
+			for (int qId = 0; qId < queries.size(); qId++) {
+				double[] q = queries.get(qId);
+				ApproxAnswer r = gate.answer(q[0], q[1], q[2], q[3]);
+				StringBuilder sb = new StringBuilder();
+				sb.append(qId).append(",,").append(r.answer).append(",false,0.0,,,0,0,").append(r.rawNanos)
+						.append(',');
+				if (Double.isNaN(q[4])) {
+					sb.append(",");
+				} else {
+					sb.append(q[4]).append(',').append(q[4] == 0 ? Double.NaN : Math.abs(q[4] - r.answer) / q[4]);
+				}
+				out.write(sb.append('\n').toString());
+			}
+		}
+		System.out.println(String.format(Locale.ROOT, "%d queries answered exactly from the raw data; wrote %s",
+				queries.size(), outFile));
 	}
 
 	private static void writePlan(String path, MergeRatePlanner.Plan plan) throws IOException {

@@ -75,6 +75,23 @@ public class GatedRangeQueryTest {
 	}
 
 	@Test
+	public void exactModeAnswersEverythingFromRawData() {
+		GatedRangeQuery g = GatedRangeQuery.exact(points(12));
+		ApproxAnswer a = g.answer(0.5, 1.0, 0.5, 1.0); // one cell: 12 points
+		assertFalse(a.fromSynopsis);
+		assertEquals(12, a.answer, 0);
+		assertEquals(0.0, a.estimatedRelError, 0);
+		assertTrue(Double.isNaN(a.synopsisEstimate));
+		assertEquals(16 * 12, g.answer(0, 4, 0, 4).answer, 0);
+		try {
+			GatedRangeQuery.exact(null);
+			fail();
+		} catch (IllegalArgumentException e) {
+			assertTrue(e.getMessage().contains("raw"));
+		}
+	}
+
+	@Test
 	public void withoutRawDataTheDecisionIsStillReported() throws IOException {
 		GatedRangeQuery g = new GatedRangeQuery(context(), predictorOnNCells(), 0.1, null);
 		ApproxAnswer a = g.answer(0, 4, 0, 4);

@@ -109,6 +109,33 @@ Use planning queries that were **not** used to calibrate `cutoffs.csv`; otherwis
 optimistic. `-minCoverage` is the share of queries a synopsis must answer for a rate to count (a synopsis that
 answers almost nothing saves nothing).
 
+## 5b. Exact execution mode
+
+`-mode` on `ApproxQueryExp` chooses how queries are answered:
+
+| `-mode` | behavior |
+|---|---|
+| `approx` | synopsis only (default; the same as omitting `-rawFallback`) |
+| `gated` | synopsis, with raw data read for queries the gate rejects (same as `-rawFallback true`) |
+| `exact` | every query is answered from the raw data; no synopsis, model or cutoff is used |
+
+Exact mode needs only the queries and the raw points, not `-runDir`, `-modelPath`, `-cutoffs`, `-mergeRate` or `-plan`:
+
+```
+java -cp $CP sigspatial25.ApproxQueryExp -mode exact \
+  -queryFile queries.csv -dataDir range_query -numFile 4 -outFile out/exact.csv
+```
+
+`-dataDir` must hold `0.csv .. <numFile-1>.csv`, tab-separated `lon lat[ ...]` lines. To use a single file such as
+`SynopsisLake/osm21_pois_shuffle_sample.csv`, link it as `0.csv` in a folder of its own and pass `-numFile 1`.
+
+`out/exact.csv` has the same columns as section 4. `answer` is the true count, `fromSynopsis` is `false`,
+`estRelError` is 0, and `rawNs` is the scan time. `mergeRate`, `errorScore` and `cutoff` are empty. If the query file
+has exact counts, `exact` and `relErr` are filled in as well.
+
+The scan is linear in the number of points (a few ms per query at 1M points once the file is loaded), so use this mode
+as a correctness baseline or for small data. In code, `GatedRangeQuery.exact(rawCounter)` gives the same behavior.
+
 ## 6. Check the Java side matches the model
 
 ```

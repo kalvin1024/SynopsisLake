@@ -28,3 +28,5 @@ The path to the file:
 ## Learned error predictor
 
 A trained LightGBM model can replace the Skewness-Align score to decide whether to answer from a merged synopsis or the raw data. See [ml/README.md](ml/README.md).
+
+`sigspatial25.ApproxQueryExp -mode exact -queryFile Q -dataDir D -numFile N` skips the synopsis and answers every query exactly from the raw data (`-mode approx` and `-mode gated` select the other paths). Details in [ml/README.md](ml/README.md#5b-exact-execution-mode).
