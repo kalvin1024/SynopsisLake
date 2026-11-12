@@ -183,4 +183,37 @@ public class MergePolicyTest {
 			assertTrue(e.getMessage().contains("not_a_feature"));
 		}
 	}
+
+	@Test
+	public void massRuleMergesTheLightestPair() {
+		double[] lon = { 0, 1, 2, 3, 4, 5 };
+		double[] lat = { 0, 1 };
+		double[][] counts = { { 40 }, { 30 }, { 1 }, { 2 }, { 50 } };
+		List<double[]> a = new ArrayList<double[]>(), b = new ArrayList<double[]>();
+		a.add(lon);
+		b.add(lat);
+		double[][] out = MergePolicy.massRule().reshape(lon, lat, counts, a, b, 4, 1);
+		assertArrayEquals(new double[] { 0, 1, 2, 4, 5 }, out[0], 0);     // buckets 2 and 3 (mass 3) merged
+	}
+
+	@Test
+	public void strategyFileSelectsArmMassOrLearned() throws IOException {
+		java.io.File dir = java.nio.file.Files.createTempDirectory("strategy").toFile();
+		assertEquals(null, writeAndLoad(dir, "strategy=arm\n").policy);
+		assertEquals("mass", writeAndLoad(dir, "strategy=mass\n").name);
+		for (String bad : new String[] { "strategy=best\n", "strategy=learned\n", "" }) {
+			try {
+				writeAndLoad(dir, bad);
+				fail(bad);
+			} catch (IllegalArgumentException e) {
+				assertTrue(e.getMessage().contains("strategy"));
+			}
+		}
+	}
+
+	private static MergeStrategy writeAndLoad(java.io.File dir, String content) throws IOException {
+		java.io.File f = new java.io.File(dir, "merge_strategy.properties");
+		java.nio.file.Files.write(f.toPath(), content.getBytes("UTF-8"));
+		return MergeStrategy.load(f.getPath());
+	}
 }
