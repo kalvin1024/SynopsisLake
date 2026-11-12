@@ -12,8 +12,8 @@
 # MAGIC 5. answer held-out queries from the synopsis with `ApproxQueryExp` (`approx.csv`)
 # MAGIC 6. compare the estimated error with the true error, and ask your own query
 # MAGIC
-# MAGIC **Needs a classic dedicated (single user) cluster on an ML runtime** (LightGBM, a `java` on the PATH and the
-# MAGIC cluster's commons-math3 jar). Serverless and shared clusters cannot start `java` with jars under
+# MAGIC **Needs a classic dedicated (single user) cluster on an ML runtime** (LightGBM, a `java` on the PATH and a
+# MAGIC commons-math3 jar, which is downloaded into the volume if the cluster has none). Serverless and shared clusters cannot start `java` with jars under
 # MAGIC `/databricks/jars`.
 # MAGIC
 # MAGIC **Inputs** (uploaded by the CI workflow `build-upload-and-run.yml`, or by hand):
@@ -131,11 +131,28 @@ for i in range(n_files):
 if not os.path.exists(src_query_file):
     problems.append(f"{src_query_file} is missing")
 
-math3 = sorted(glob.glob("/databricks/jars/*commons-math3*.jar")
-               + glob.glob("/databricks/jars/**/*commons-math3*.jar", recursive=True)
-               + glob.glob(os.path.expanduser("~/.m2/**/commons-math3-*.jar"), recursive=True))
-if not math3:
-    problems.append("no commons-math3 jar under /databricks/jars (needs a classic dedicated cluster)")
+def find_math3(volume):
+    """commons-math3 jar for the classpath: the cluster's own copy if there is one, else one cached in the volume,
+    else downloaded once from Maven Central into <volume>/jars (upload it there by hand if the cluster is offline)."""
+    patterns = ["/databricks/jars/**/*commons-math3*.jar", "/databricks/**/commons-math3*.jar",
+                "/usr/share/java/commons-math3*.jar", os.path.expanduser("~/.m2/**/commons-math3-*.jar"),
+                f"{volume}/jars/commons-math3*.jar"]
+    for pat in patterns:
+        found = sorted(glob.glob(pat, recursive=True))
+        if found:
+            return found[0]
+    target = f"{volume}/jars/commons-math3-3.6.1.jar"
+    import urllib.request
+    urllib.request.urlretrieve("https://repo1.maven.org/maven2/org/apache/commons/commons-math3/3.6.1/"
+                               "commons-math3-3.6.1.jar", target)
+    return target
+
+
+try:
+    math3 = [find_math3(volume)]
+except Exception as e:
+    math3 = []
+    problems.append(f"no commons-math3 jar found or downloadable ({e}); upload commons-math3-3.6.1.jar to {volume}/jars/")
 if problems:
     raise RuntimeError("fix before continuing:\n - " + "\n - ".join(problems))
 classpath = f"{jar}:{math3[0]}"

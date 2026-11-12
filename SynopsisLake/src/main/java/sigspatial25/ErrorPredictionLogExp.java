@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.TreeSet;
 
 import org.apache.commons.math3.distribution.BetaDistribution;
@@ -14,6 +15,8 @@ import predictor.CutoffTable;
 import predictor.ErrorPredictor;
 import predictor.GatedRangeQuery;
 import predictor.LearnedErrorPredictor;
+import predictor.MergePolicy;
+import predictor.MergeStrategy;
 import predictor.PointScanCounter;
 import predictor.PredictorFactory;
 import predictor.QueryErrorEstimator;
@@ -37,6 +40,14 @@ import utils.UtilsFunction;
  * -modelPath <model.txt> also scores every query with that LightGBM model (predictor.LearnedErrorPredictor)
  * and adds a learnedErr column: the model's estimate of the relative error, to be compared with predErr.
  *
+ * Learned merge policy: -mergePolicy <merge_policy.txt> (trained by ml/merge_policy.py) also reshapes the aligned
+ * histogram with predictor.MergePolicy instead of ARM's density-difference score, for every merge rate, and writes
+ * learned_<lonRes>.txt (same format as arm_<lonRes>.txt) and rows_learned.csv (the rows.csv columns without
+ * learnedErr, method LEARNED) so the two can be compared on identical queries. -mergePolicy mass uses the simple
+ * rule "merge the pair of buckets with the fewest points" instead of a model. -mergeStrategy
+ * <merge_strategy.properties>, written by the guardrail (ml/merge_policy.py select), writes selected_<lonRes>.txt
+ * with the strategy it chose for the dataset (arm, mass or learned).
+ *
  * Gate (query path, predictor.GatedRangeQuery): with a cutoff (-cutoffs <cutoffs.csv> per merge rate and/or
  * -cutoff <value>, or gate.cutoff in model.properties with -gate true) every query is also run through the gate and one row per
  * (merge rate, query) goes to gated.csv: the answer returned, whether it came from the synopsis or the raw data,
@@ -54,6 +65,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 	ErrorPredictor gatePredictor;
 	CutoffTable cutoffs;
 	RawRangeCounter rawCounter;
+	MergePolicy mergePolicy;
+	MergeStrategy strategy;
 
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
 			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath) throws IOException {
@@ -63,12 +76,29 @@ public class ErrorPredictionLogExp extends CountHistExp {
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
 			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate)
 			throws IOException {
+		this(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride, reproduceAuthors, modelPath, gate,
+				null);
+	}
+
+	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate,
+			String mergePolicyPath) throws IOException {
+		this(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride, reproduceAuthors, modelPath, gate,
+				mergePolicyPath, null);
+	}
+
+	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate,
+			String mergePolicyPath, String strategyPath) throws IOException {
 		super(dataDir.endsWith("/") ? dataDir : dataDir + "/", "", numFile, 2, 0.5, queryFile);
 		setSrcResolution(srcRes);
 		this.outDir = outDir.endsWith("/") ? outDir : outDir + "/";
 		this.fixStride = fixStride;
 		this.reproduceAuthors = reproduceAuthors;
 		this.learned = modelPath == null ? null : LearnedErrorPredictor.load(modelPath);
+		this.mergePolicy = mergePolicyPath == null ? null
+				: mergePolicyPath.equals("mass") ? MergePolicy.massRule() : MergePolicy.load(mergePolicyPath);
+		this.strategy = strategyPath == null ? null : MergeStrategy.load(strategyPath);
 		if (gate != null) {
 			this.gatePredictor = gate.skewPredictor ? PredictorFactory.predictor(null, null)
 					: (learned != null ? learned : PredictorFactory.predictor(null, null));
@@ -101,6 +131,12 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		rows.write("method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,"
 				+ "cellsTouched,srcSumEst" + (learned == null ? "" : ",learnedErr") + "\n");
 
+		FileWriter learnedRows = null;
+		if (mergePolicy != null) {
+			learnedRows = new FileWriter(this.outDir + "rows_learned.csv");
+			learnedRows.write("method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,"
+					+ "cellsTouched,srcSumEst\n");
+		}
 		FileWriter gated = null;
 		if (cutoffs != null) {
 			gated = new FileWriter(this.outDir + "gated.csv");
@@ -122,14 +158,30 @@ public class ErrorPredictionLogExp extends CountHistExp {
 
 			SimpleSpatialHistogramOpt arm = buildArm(srcHists);
 			writeHist(this.outDir + "arm_" + lonRes + ".txt", arm, mergeRate);
-			double meanRelErr = logQueries(rows, rangeQueries, srcHists, arm);
+			if (strategy != null) {
+				SimpleSpatialHistogramOpt chosen = strategy.policy == null ? arm
+						: buildLearned(srcHists, lonTargetResolution, latTargetResolution, strategy.policy);
+				writeHist(this.outDir + "selected_" + lonRes + ".txt", chosen, mergeRate);
+			}
+			double meanRelErr = logQueries(rows, "ARM", learned, rangeQueries, srcHists, arm);
 			if (gated != null) {
 				logGated(gated, rangeQueries, srcHists, arm);
 			}
-			System.out.println(String.format("mergeRate %.1f%%, lonRes %d: mean relErr %.3f", mergeRate * 100,
-					lonRes, meanRelErr));
+			String learnedSummary = "";
+			if (mergePolicy != null) {
+				SimpleSpatialHistogramOpt policyHist = buildLearned(srcHists, lonTargetResolution,
+						latTargetResolution);
+				writeHist(this.outDir + "learned_" + lonRes + ".txt", policyHist, mergeRate);
+				learnedSummary = String.format(", learned merge policy %.3f",
+						logQueries(learnedRows, "LEARNED", null, rangeQueries, srcHists, policyHist));
+			}
+			System.out.println(String.format("mergeRate %.1f%%, lonRes %d: mean relErr %.3f%s", mergeRate * 100,
+					lonRes, meanRelErr, learnedSummary));
 		}
 		rows.close();
+		if (learnedRows != null) {
+			learnedRows.close();
+		}
 		if (gated != null) {
 			gated.close();
 		}
@@ -181,15 +233,48 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		return alignCombineHist;
 	}
 
-	private double logQueries(FileWriter rows, ArrayList<double[]> rangeQueries, SimpleSpatialHistogramOpt[] srcHists,
-			SimpleSpatialHistogramOpt arm) throws IOException {
+	/**
+	 * Like buildArm, but the boundaries come from the learned merge policy: align the sources on the union of their
+	 * boundaries, let the policy drop boundaries down to the target resolution, then aggregate the sources into the
+	 * resulting buckets.
+	 */
+	private SimpleSpatialHistogramOpt buildLearned(SimpleSpatialHistogramOpt[] srcHists, int targetLon,
+			int targetLat) {
+		return buildLearned(srcHists, targetLon, targetLat, mergePolicy);
+	}
+
+	private SimpleSpatialHistogramOpt buildLearned(SimpleSpatialHistogramOpt[] srcHists, int targetLon,
+			int targetLat, MergePolicy mergePolicy) {
+		double[] lon = distinctBoundaries(srcHists, true);
+		double[] lat = distinctBoundaries(srcHists, false);
+		SimpleSpatialHistogramOpt aligned = new SimpleSpatialHistogramOpt(MinMinLon, MinMinLat, MaxMaxLon,
+				MaxMaxLat, lon.length - 1, lat.length - 1, lon, lat);
+		List<double[]> srcLon = new ArrayList<double[]>();
+		List<double[]> srcLat = new ArrayList<double[]>();
+		for (SimpleSpatialHistogramOpt src : srcHists) {
+			aligned.aggregateHistogramSep(src);
+			srcLon.add(src.getLonBoundary());
+			srcLat.add(src.getLatBoundary());
+		}
+		double[][] bounds = mergePolicy.reshape(lon, lat, aligned.getData(), srcLon, srcLat, targetLon, targetLat);
+		SimpleSpatialHistogramOpt hist = new SimpleSpatialHistogramOpt(MinMinLon, MinMinLat, MaxMaxLon, MaxMaxLat,
+				bounds[0].length - 1, bounds[1].length - 1, bounds[0], bounds[1]);
+		for (SimpleSpatialHistogramOpt src : srcHists) {
+			hist.aggregateHistogramSep(src);
+		}
+		return hist;
+	}
+
+	private double logQueries(FileWriter rows, String method, ErrorPredictor errorModel,
+			ArrayList<double[]> rangeQueries, SimpleSpatialHistogramOpt[] srcHists, SimpleSpatialHistogramOpt arm)
+			throws IOException {
 		BetaDistribution betaArm = beta(arm);
 		BetaDistribution[] betaSrc = new BetaDistribution[srcHists.length];
 		for (int sId = 0; sId < srcHists.length; sId++) {
 			betaSrc[sId] = beta(srcHists[sId]);
 		}
-		QueryErrorEstimator learnedErr = learned == null ? null
-				: learned.bind(new SynopsisContext(arm, srcHists, mergeRate, betaArm));
+		QueryErrorEstimator learnedErr = errorModel == null ? null
+				: errorModel.bind(new SynopsisContext(arm, srcHists, mergeRate, betaArm));
 		int lonRes = arm.getLonBoundary().length - 1;
 		int latRes = arm.getLatBoundary().length - 1;
 		double totalRelErr = 0;
@@ -207,7 +292,7 @@ public class ErrorPredictionLogExp extends CountHistExp {
 			double relErr = Math.abs(gt - ans[0]) / gt;
 			totalRelErr += relErr;
 			sb.setLength(0);
-			sb.append("ARM,").append(mergeRate).append(',').append(lonRes).append(',').append(latRes).append(',')
+			sb.append(method).append(',').append(mergeRate).append(',').append(lonRes).append(',').append(latRes).append(',')
 					.append(qId).append(',').append(gt).append(',').append(ans[0]).append(',').append(relErr)
 					.append(',').append(ans[2]).append(',').append(betaArm.getAlpha()).append(',')
 					.append(ans.length > 3 ? ans[3] : 0.0).append(',').append(ans.length > 4 ? (int) ans[4] : 0)
@@ -242,14 +327,23 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		return new BetaDistribution(param, param);
 	}
 
-	private static int numDistinct(SimpleSpatialHistogramOpt[] hists, boolean lon) {
+	private static double[] distinctBoundaries(SimpleSpatialHistogramOpt[] hists, boolean lon) {
 		TreeSet<Double> set = new TreeSet<Double>();
 		for (SimpleSpatialHistogramOpt h : hists) {
 			for (double b : lon ? h.getLonBoundary() : h.getLatBoundary()) {
 				set.add(b);
 			}
 		}
-		return set.size();
+		double[] out = new double[set.size()];
+		int i = 0;
+		for (double b : set) {
+			out[i++] = b;
+		}
+		return out;
+	}
+
+	private static int numDistinct(SimpleSpatialHistogramOpt[] hists, boolean lon) {
+		return distinctBoundaries(hists, lon).length;
 	}
 
 	/** Line 1 merge rate, line 2 lon boundaries, line 3 lat boundaries, then one row of counts per lon bucket. */
@@ -300,6 +394,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		boolean fixStride = false;
 		boolean reproduceAuthors = false;
 		String modelPath = null;
+		String mergePolicyPath = null;
+		String strategyPath = null;
 		GateOptions gate = new GateOptions();
 		boolean gateWanted = false;
 
@@ -324,6 +420,10 @@ public class ErrorPredictionLogExp extends CountHistExp {
 				reproduceAuthors = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-modelPath")) {
 				modelPath = emptyToNull(args[++i]);
+			} else if (args[i].equals("-mergeStrategy")) {
+				strategyPath = emptyToNull(args[++i]);
+			} else if (args[i].equals("-mergePolicy")) {
+				mergePolicyPath = emptyToNull(args[++i]);
 			} else if (args[i].equals("-gate")) {
 				gateWanted = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-cutoffs")) {
@@ -353,8 +453,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		}
 		System.out.println("dataDir=" + dataDir + " numFile=" + numFile + " queryFile=" + queryFile + " outDir="
 				+ outDir + " end=" + end + " step=" + step + " fixStride=" + fixStride + " reproduceAuthors="
-				+ reproduceAuthors + " modelPath=" + modelPath);
+				+ reproduceAuthors + " modelPath=" + modelPath + " mergePolicy=" + mergePolicyPath);
 		new ErrorPredictionLogExp(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride,
-				reproduceAuthors, modelPath, gateWanted || gate.rawFallback ? gate : null);
+				reproduceAuthors, modelPath, gateWanted || gate.rawFallback ? gate : null, mergePolicyPath, strategyPath);
 	}
 }

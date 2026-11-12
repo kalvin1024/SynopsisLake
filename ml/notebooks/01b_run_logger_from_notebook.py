@@ -14,6 +14,7 @@
 # COMMAND ----------
 
 import glob
+import os
 import subprocess
 
 import pandas as pd
@@ -35,10 +36,23 @@ out_dir = f"{volume}/output/ml/{dataset}/"
 # COMMAND ----------
 
 jar = f"{volume}/jars/synopsislake.jar"
-math3 = sorted(glob.glob("/databricks/jars/*commons-math3*.jar") + glob.glob("/databricks/jars/**/*commons-math3*.jar",
-                                                                              recursive=True))
-if not math3:
-    raise FileNotFoundError("no commons-math3 jar under /databricks/jars (needs a classic dedicated cluster)")
+def find_math3(volume):
+    """commons-math3 jar for the classpath: the cluster's own copy if there is one, else one cached in the volume,
+    else downloaded once from Maven Central into <volume>/jars (upload it there by hand if the cluster is offline)."""
+    patterns = ["/databricks/jars/**/*commons-math3*.jar", "/databricks/**/commons-math3*.jar",
+                "/usr/share/java/commons-math3*.jar", os.path.expanduser("~/.m2/**/commons-math3-*.jar"),
+                f"{volume}/jars/commons-math3*.jar"]
+    for pat in patterns:
+        found = sorted(glob.glob(pat, recursive=True))
+        if found:
+            return found[0]
+    target = f"{volume}/jars/commons-math3-3.6.1.jar"
+    import urllib.request
+    urllib.request.urlretrieve("https://repo1.maven.org/maven2/org/apache/commons/commons-math3/3.6.1/"
+                               "commons-math3-3.6.1.jar", target)
+    return target
+
+math3 = [find_math3(volume)]
 cmd = ["java", "-cp", f"{jar}:{math3[0]}", "sigspatial25.ErrorPredictionLogExp",
        "-dataDir", data_dir + "/", "-numFile", "4", "-srcRes", "40,56,32,48", "-queryFile", query_file,
        "-outDir", out_dir, "-end", "42", "-step", "8",
