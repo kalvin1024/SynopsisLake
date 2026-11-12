@@ -147,6 +147,60 @@ It compares the Java scores with `Booster.predict` and fails if more than 0.5% o
 is below 0.9999. Features differ from numpy in the last bit, so a model that splits on rounding noise sends about 0.1%
 of rows down another path; rank and AUC do not change. Run it once for every new model.
 
+## 7. Learned merge policy (replaces ARM's reshape score)
+
+Everything above scores the *error* of an answer. This section changes how the synopsis itself is built: ARM's reshape
+step drops boundaries of the aligned histogram in the order of a hand-written density-difference score, and the learned
+policy picks the drops with a LightGBM model instead (`ml/merge_policy.py` trains it, `predictor.MergePolicy` runs it).
+Align and Merge are unchanged; only the choice of boundaries differs.
+
+**How it works.** A candidate is one boundary on one axis (dropping it merges the two adjacent buckets). Its features
+describe those buckets (widths, counts, density gap, how different their profiles across the other axis are, how many
+sources have a boundary there, ...) and no query workload is needed to use the policy. The label is the true increase in
+mean relative error, on training queries with known counts, when that boundary is dropped from the current histogram.
+The policy repeatedly drops the lowest predicted increase, on the axis with the most drops left.
+
+**Train** (needs `lightgbm`; the run folder from section 3 and a dataset folder with `queries-Ans.txt`):
+
+```
+python ml/merge_policy.py train out/ml/authors_range data/ml/authors_range out/merge_policy [--synthetic-data range_query]
+python ml/merge_policy.py eval  out/ml/authors_range data/ml/authors_range out/merge_policy/merge_policy.txt
+```
+
+`--synthetic-data DIR` trains on uniformly placed synthetic queries of many sizes (exact counts from the raw points)
+instead of the dataset's own queries; use `--synthetic-width/--synthetic-height` (degrees) so they cover the real query
+sizes. On Databricks, notebook `08_train_merge_policy` does the training, runs the Java side and shows the comparison.
+
+**Use it in Java:**
+
+```
+java -cp $CP sigspatial25.ErrorPredictionLogExp -dataDir range_query -queryFile ... -outDir out/ml/authors_range \
+  -mergePolicy out/merge_policy/merge_policy.txt
+```
+
+This also writes `learned_<res>.txt` (same format as `arm_<res>.txt`) and `rows_learned.csv` (the `rows.csv` columns
+without `learnedErr`, `method=LEARNED`), so ARM and the learned merge can be compared on identical queries.
+
+**What to expect.** On held-out queries, mean relative error at merge rates at or below 73% of full resolution, against
+ARM (Java, same queries):
+
+| dataset | trained on | change vs ARM |
+|---|---|---|
+| authors' US data (10.5M points) | synthetic uniform queries | about -15% (up to -24% at the lowest resolutions) |
+| global OSM sample, sources at resolution 120..168 (1M points) | synthetic uniform queries | about -9% |
+| authors' US data | the dataset's own queries (3 seeds) | -8% to -25% |
+| global OSM sample | the dataset's own queries (3 seeds) | about -14% |
+
+Caveats: it is trained per dataset and needs a pass over the raw points for exact counts. With synthetic training the
+policy is about 1-2% *worse* than ARM at the very lightest merge rates (just below full resolution). Training on one
+query size and testing on another was 3-4x worse than ARM on the authors' data (not on the OSM data), so train on a
+broad workload and check held-out query sizes before relying on it. A dataset whose error barely depends on the merge
+rate (error set by the source resolution) has nothing to gain: ARM and the oracle policy differ by about 3% there.
+
+`python ml/merge_policy.py golden FILE` rewrites the fixture `SynopsisLake/src/test/resources/merge_policy_golden.txt`
+that `MergePolicyTest` uses to check the Java features against the Python ones; regenerate it if `candidate_features`
+changes.
+
 ## Using it from Java
 
 ```java
