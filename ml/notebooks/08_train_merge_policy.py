@@ -105,11 +105,28 @@ if not os.path.exists(f"{ds_dir}/queries-Ans.txt"):
     problems.append(f"{ds_dir}/queries-Ans.txt is missing (notebook 01)")
 if synthetic and not glob.glob(f"{get('synthetic_data')}/*.csv"):
     problems.append(f"synthetic = true needs raw points in {get('synthetic_data')}/0.csv ..")
-math3 = sorted(glob.glob("/databricks/jars/*commons-math3*.jar")
-               + glob.glob("/databricks/jars/**/*commons-math3*.jar", recursive=True)
-               + glob.glob(os.path.expanduser("~/.m2/**/commons-math3-*.jar"), recursive=True))
-if not math3:
-    problems.append("no commons-math3 jar under /databricks/jars")
+def find_math3(volume):
+    """commons-math3 jar for the classpath: the cluster's own copy if there is one, else one cached in the volume,
+    else downloaded once from Maven Central into <volume>/jars (upload it there by hand if the cluster is offline)."""
+    patterns = ["/databricks/jars/**/*commons-math3*.jar", "/databricks/**/commons-math3*.jar",
+                "/usr/share/java/commons-math3*.jar", os.path.expanduser("~/.m2/**/commons-math3-*.jar"),
+                f"{volume}/jars/commons-math3*.jar"]
+    for pat in patterns:
+        found = sorted(glob.glob(pat, recursive=True))
+        if found:
+            return found[0]
+    target = f"{volume}/jars/commons-math3-3.6.1.jar"
+    import urllib.request
+    urllib.request.urlretrieve("https://repo1.maven.org/maven2/org/apache/commons/commons-math3/3.6.1/"
+                               "commons-math3-3.6.1.jar", target)
+    return target
+
+
+try:
+    math3 = [find_math3(volume)]
+except Exception as e:
+    math3 = []
+    problems.append(f"no commons-math3 jar found or downloadable ({e}); upload commons-math3-3.6.1.jar to {volume}/jars/")
 if problems:
     raise RuntimeError("fix before continuing:\n - " + "\n - ".join(problems))
 classpath = f"{jar}:{math3[0]}"
