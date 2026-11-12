@@ -220,3 +220,39 @@ low = cmp_[cmp_.index <= 0.73 * full]
 print(f"merge rates at or below 73% of full resolution: ARM {low.ARM.mean():.4f}, learned {low.learned.mean():.4f} "
       f"({low.learned.mean() / low.ARM.mean() - 1:+.1%}); learned is lower at {(low.learned < low.ARM).sum()} of "
       f"{len(low)} resolutions")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Guardrail: pick the strategy for this dataset
+# MAGIC
+# MAGIC The learned policy is an option, not a replacement. `select` compares ARM, the simple rule "merge the pair of
+# MAGIC buckets with the fewest points" and the learned policy on the dataset's **validation** queries (a split the
+# MAGIC policy never trained on) and picks the one with the lowest mean error, **provided it is no worse than ARM by more
+# MAGIC than `tolerance` (default 2%) in any of the small / medium / large query-size thirds**. ARM wins whenever nothing
+# MAGIC qualifies. It then repeats the comparison on the held-out test queries and writes `merge_strategy.properties`
+# MAGIC (`strategy=arm|mass|learned`) and `merge_strategy_report.csv` to `<run folder>/merge_policy/`.
+# MAGIC
+# MAGIC The validation queries come from the dataset's own workload, so the guardrail protects against a policy that does
+# MAGIC not work on this data, not against a later change of workload: re-run it when the workload changes.
+
+# COMMAND ----------
+
+tolerance = float(get("tolerance")) if "tolerance" in DEFAULTS else 0.02
+chosen, val_summary, test_summary = mp.select_strategy(aligned, resolutions, run_dir, ds_dir, out_dir, model_path,
+                                                       seed, tolerance)
+for title, t in (("validation", val_summary), ("held-out test", test_summary)):
+    print(title)
+    try:
+        display(t.reset_index().round(4))  # noqa: F821
+    except NameError:
+        print(t.round(4).to_string())
+print(f"chosen strategy: {chosen}  ->  {out_dir}/merge_strategy.properties")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC To build the synopses with the chosen strategy, pass the file to the Java pipeline:
+# MAGIC `ErrorPredictionLogExp ... -mergeStrategy <run folder>/merge_policy/merge_strategy.properties` writes
+# MAGIC `selected_<res>.txt` (ARM's histogram when the strategy is `arm`, otherwise the policy's) next to `arm_<res>.txt`.
+# MAGIC `-mergePolicy mass` runs the simple rule on its own.

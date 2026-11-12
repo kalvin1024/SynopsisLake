@@ -18,6 +18,7 @@ checks the features against.
 
     python ml/merge_policy.py train  RUN_DIR DATASET_DIR OUT_DIR [--synthetic-data DIR] [--seed 0]
     python ml/merge_policy.py eval   RUN_DIR DATASET_DIR MODEL   [--seed 0]
+    python ml/merge_policy.py select RUN_DIR DATASET_DIR OUT_DIR [--model M] [--tolerance 0.02] [--seed 0]
     python ml/merge_policy.py golden OUT_FILE
 
 RUN_DIR is a run folder from ErrorPredictionLogExp (arm_<res>.txt, src_<i>.txt, rows.csv); DATASET_DIR holds
@@ -265,6 +266,103 @@ def evaluate(aligned, resolutions, model, test, run_dir, test_ids):
 
 
 # ---------------------------------------------------------------------------------------------------------
+# guardrail: choose ARM, the mass rule or the learned policy per dataset
+# ---------------------------------------------------------------------------------------------------------
+
+STRATEGIES = ("arm", "mass", "learned")
+WINDOW = 0.73           # only resolutions at or below this fraction of the full resolution are compared
+
+
+def load_split(dataset_dir, seed, which):
+    """Queries (count >= MIN_EXACT) of the 'val' (20%) or 'test' (30%) split by query id, as in load_queries."""
+    from gate_eval import split_ids
+    q = pd.read_csv(os.path.join(dataset_dir, "queries-Ans.txt"), header=None).to_numpy()
+    ok = np.where(q[:, 4] >= MIN_EXACT)[0]
+    _, va, te = split_ids(ok, seed)
+    ids = np.array(sorted(va if which == "val" else te))
+    return q[ids, :4], q[ids, 4]
+
+
+def mass_pick(f, axis, damage):
+    """The simple rule: merge the pair of buckets with the fewest points."""
+    return int(np.argmin(f[:, FEATURES.index("log_cm")]))
+
+
+def per_query_errors(aligned, resolutions, run_dir, queries, booster=None):
+    """{strategy: {res: relative error per query}} for ARM (its arm_<res>.txt), the mass rule and, with a model,
+    the learned policy."""
+    q, gt = queries
+    out = {"arm": {}, "mass": {}}
+    for r in resolutions:
+        _, lon, lat, counts = load_hist(os.path.join(run_dir, f"arm_{r}.txt"))
+        out["arm"][r] = np.abs(answers(lon, lat, counts, q) - gt) / gt
+    snaps, _ = trajectory_snapshots(aligned, set(resolutions), mass_pick)
+    out["mass"] = {r: np.abs(answers(*snaps[r][:3], q) - gt) / gt for r in resolutions}
+    if booster is not None:
+        pick = lambda f, a, d: int(np.argmin(booster.predict(pd.DataFrame(f, columns=FEATURES))))
+        snaps, _ = trajectory_snapshots(aligned, set(resolutions), pick)
+        out["learned"] = {r: np.abs(answers(*snaps[r][:3], q) - gt) / gt for r in resolutions}
+    return out
+
+
+def summarize(errors, queries, full_res):
+    """Per strategy: mean error over the window's resolutions, overall and within each query-size third (by area).
+    Returns a DataFrame indexed by strategy with columns overall, small, medium, large."""
+    q, _ = queries
+    area = (q[:, 1] - q[:, 0]) * (q[:, 3] - q[:, 2])
+    lo, hi = np.quantile(area, [1 / 3, 2 / 3])
+    groups = {"overall": np.ones(len(q), bool), "small": area <= lo,
+              "medium": (area > lo) & (area <= hi), "large": area > hi}
+    rows = {}
+    for name, per_res in errors.items():
+        res = [r for r in per_res if r <= WINDOW * full_res]
+        rows[name] = {g: float(np.mean([per_res[r][m].mean() for r in res])) for g, m in groups.items()}
+    return pd.DataFrame(rows).T
+
+
+def choose(summary, tolerance):
+    """Lowest overall error among the strategies that are no worse than ARM by more than `tolerance` (relative)
+    in every query-size group. ARM is always eligible."""
+    arm = summary.loc["arm"]
+    eligible = {}
+    for name in summary.index:
+        ratio = summary.loc[name] / arm
+        if name == "arm" or ratio.drop("overall").max() <= 1 + tolerance:
+            eligible[name] = summary.loc[name, "overall"]
+        else:
+            worst = ratio.drop("overall").idxmax()
+            print(f"  not eligible - {name}: {ratio[worst] - 1:+.1%} vs ARM on {worst} queries")
+    best = min(eligible, key=eligible.get)
+    return best, eligible
+
+
+def select_strategy(aligned, resolutions, run_dir, dataset_dir, out_dir, model_path, seed, tolerance):
+    """Pick the strategy on validation queries, confirm on test queries, write merge_strategy.properties and
+    merge_strategy_report.csv into out_dir."""
+    booster = None
+    if model_path and os.path.exists(model_path):
+        try:
+            import lightgbm as lgb
+            booster = lgb.Booster(model_file=model_path)
+        except ImportError:
+            print("lightgbm is not installed: the learned policy is not considered")
+    val, test = load_split(dataset_dir, seed, "val"), load_split(dataset_dir, seed, "test")
+    full = aligned.n0[0]
+    v = summarize(per_query_errors(aligned, resolutions, run_dir, val, booster), val, full)
+    chosen, eligible = choose(v, tolerance)
+    t = summarize(per_query_errors(aligned, resolutions, run_dir, test, booster), test, full)
+    os.makedirs(out_dir, exist_ok=True)
+    report = pd.concat({"validation": v, "test": t}, names=["split", "strategy"])
+    report["chosen"] = [s == chosen for _, s in report.index]
+    report.round(5).to_csv(os.path.join(out_dir, "merge_strategy_report.csv"))
+    with open(os.path.join(out_dir, "merge_strategy.properties"), "w") as w:
+        w.write(f"strategy={chosen}\n")
+        if chosen == "learned":
+            w.write(f"model={os.path.relpath(model_path, out_dir)}\n")
+    return chosen, v, t
+
+
+# ---------------------------------------------------------------------------------------------------------
 # golden fixture for the Java parity test
 # ---------------------------------------------------------------------------------------------------------
 
@@ -323,6 +421,12 @@ def main():
     e = sub.add_parser("eval")
     e.add_argument("run_dir"), e.add_argument("dataset_dir"), e.add_argument("model")
     e.add_argument("--seed", type=int, default=0)
+    sl = sub.add_parser("select", help="guardrail: choose ARM, the mass rule or the learned policy on validation queries")
+    sl.add_argument("run_dir"), sl.add_argument("dataset_dir"), sl.add_argument("out_dir")
+    sl.add_argument("--model", help="merge_policy.txt (default OUT_DIR/merge_policy.txt); without one only ARM and the mass rule compete")
+    sl.add_argument("--tolerance", type=float, default=0.02,
+                    help="largest relative error increase over ARM allowed in any query-size group (default 0.02)")
+    sl.add_argument("--seed", type=int, default=0)
     g = sub.add_parser("golden")
     g.add_argument("out_file")
     a = ap.parse_args()
@@ -332,6 +436,15 @@ def main():
         print("wrote", a.out_file)
         return
     aligned, res = Aligned.from_run_dir(a.run_dir)
+    if a.cmd == "select":
+        model = a.model or os.path.join(a.out_dir, "merge_policy.txt")
+        chosen, v, t = select_strategy(aligned, res, a.run_dir, a.dataset_dir, a.out_dir, model, a.seed, a.tolerance)
+        print("validation (mean relative error over resolutions <= 73% of full, by query size):")
+        print(v.round(4).to_string())
+        print("held-out test:")
+        print(t.round(4).to_string())
+        print(f"chosen: {chosen} -> {a.out_dir}/merge_strategy.properties")
+        return
     train_labels, test, test_ids = load_queries(a.dataset_dir, a.seed, getattr(a, "train_queries", 4000))
     if a.cmd == "train":
         if a.synthetic_data:

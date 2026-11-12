@@ -26,13 +26,24 @@ public class MergePolicy {
 
 	private static final double SOURCE_TOLERANCE = 1e-9;
 
-	private final LightGBMModel model;
-	private final int[] column;
+	/** Scores a candidate boundary from its FEATURE_NAMES-ordered features; the lowest score is dropped first. */
+	public interface Scorer {
+		double score(double[] features);
+	}
+
+	private final Scorer scorer;
+
+	public MergePolicy(Scorer scorer) {
+		this.scorer = scorer;
+	}
 
 	public MergePolicy(LightGBMModel model) {
-		this.model = model;
+		this(modelScorer(model));
+	}
+
+	private static Scorer modelScorer(final LightGBMModel model) {
 		String[] names = model.getFeatureNames();
-		this.column = new int[names.length];
+		final int[] column = new int[names.length];
 		for (int i = 0; i < names.length; i++) {
 			int c = Arrays.asList(FEATURE_NAMES).indexOf(names[i]);
 			if (c < 0) {
@@ -41,6 +52,25 @@ public class MergePolicy {
 			}
 			column[i] = c;
 		}
+		return new Scorer() {
+			public double score(double[] f) {
+				double[] x = new double[column.length];
+				for (int i = 0; i < x.length; i++) {
+					x[i] = f[column[i]];
+				}
+				return model.predict(x);
+			}
+		};
+	}
+
+	/** The simple rule: merge the pair of adjacent buckets holding the fewest points (feature log_cm). */
+	public static MergePolicy massRule() {
+		final int cm = Arrays.asList(FEATURE_NAMES).indexOf("log_cm");
+		return new MergePolicy(new Scorer() {
+			public double score(double[] f) {
+				return f[cm];
+			}
+		});
 	}
 
 	public static MergePolicy load(String modelPath) throws IOException {
@@ -72,14 +102,10 @@ public class MergePolicy {
 			}
 			int axis = remaining0 >= remaining1 ? 0 : 1;
 			double[][] f = s.features(axis);
-			double[] x = new double[column.length];
 			int best = 0;
 			double bestScore = Double.POSITIVE_INFINITY;
 			for (int c = 0; c < f.length; c++) {
-				for (int i = 0; i < x.length; i++) {
-					x[i] = f[c][column[i]];
-				}
-				double score = model.predict(x);
+				double score = scorer.score(f[c]);
 				if (score < bestScore) {
 					bestScore = score;
 					best = c;

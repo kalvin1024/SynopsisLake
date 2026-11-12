@@ -16,6 +16,7 @@ import predictor.ErrorPredictor;
 import predictor.GatedRangeQuery;
 import predictor.LearnedErrorPredictor;
 import predictor.MergePolicy;
+import predictor.MergeStrategy;
 import predictor.PointScanCounter;
 import predictor.PredictorFactory;
 import predictor.QueryErrorEstimator;
@@ -42,7 +43,10 @@ import utils.UtilsFunction;
  * Learned merge policy: -mergePolicy <merge_policy.txt> (trained by ml/merge_policy.py) also reshapes the aligned
  * histogram with predictor.MergePolicy instead of ARM's density-difference score, for every merge rate, and writes
  * learned_<lonRes>.txt (same format as arm_<lonRes>.txt) and rows_learned.csv (the rows.csv columns without
- * learnedErr, method LEARNED) so the two can be compared on identical queries.
+ * learnedErr, method LEARNED) so the two can be compared on identical queries. -mergePolicy mass uses the simple
+ * rule "merge the pair of buckets with the fewest points" instead of a model. -mergeStrategy
+ * <merge_strategy.properties>, written by the guardrail (ml/merge_policy.py select), writes selected_<lonRes>.txt
+ * with the strategy it chose for the dataset (arm, mass or learned).
  *
  * Gate (query path, predictor.GatedRangeQuery): with a cutoff (-cutoffs <cutoffs.csv> per merge rate and/or
  * -cutoff <value>, or gate.cutoff in model.properties with -gate true) every query is also run through the gate and one row per
@@ -62,6 +66,7 @@ public class ErrorPredictionLogExp extends CountHistExp {
 	CutoffTable cutoffs;
 	RawRangeCounter rawCounter;
 	MergePolicy mergePolicy;
+	MergeStrategy strategy;
 
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
 			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath) throws IOException {
@@ -78,13 +83,22 @@ public class ErrorPredictionLogExp extends CountHistExp {
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
 			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate,
 			String mergePolicyPath) throws IOException {
+		this(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride, reproduceAuthors, modelPath, gate,
+				mergePolicyPath, null);
+	}
+
+	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate,
+			String mergePolicyPath, String strategyPath) throws IOException {
 		super(dataDir.endsWith("/") ? dataDir : dataDir + "/", "", numFile, 2, 0.5, queryFile);
 		setSrcResolution(srcRes);
 		this.outDir = outDir.endsWith("/") ? outDir : outDir + "/";
 		this.fixStride = fixStride;
 		this.reproduceAuthors = reproduceAuthors;
 		this.learned = modelPath == null ? null : LearnedErrorPredictor.load(modelPath);
-		this.mergePolicy = mergePolicyPath == null ? null : MergePolicy.load(mergePolicyPath);
+		this.mergePolicy = mergePolicyPath == null ? null
+				: mergePolicyPath.equals("mass") ? MergePolicy.massRule() : MergePolicy.load(mergePolicyPath);
+		this.strategy = strategyPath == null ? null : MergeStrategy.load(strategyPath);
 		if (gate != null) {
 			this.gatePredictor = gate.skewPredictor ? PredictorFactory.predictor(null, null)
 					: (learned != null ? learned : PredictorFactory.predictor(null, null));
@@ -144,6 +158,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 
 			SimpleSpatialHistogramOpt arm = buildArm(srcHists);
 			writeHist(this.outDir + "arm_" + lonRes + ".txt", arm, mergeRate);
+			if (strategy != null) {
+				SimpleSpatialHistogramOpt chosen = strategy.policy == null ? arm
+						: buildLearned(srcHists, lonTargetResolution, latTargetResolution, strategy.policy);
+				writeHist(this.outDir + "selected_" + lonRes + ".txt", chosen, mergeRate);
+			}
 			double meanRelErr = logQueries(rows, "ARM", learned, rangeQueries, srcHists, arm);
 			if (gated != null) {
 				logGated(gated, rangeQueries, srcHists, arm);
@@ -221,6 +240,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 	 */
 	private SimpleSpatialHistogramOpt buildLearned(SimpleSpatialHistogramOpt[] srcHists, int targetLon,
 			int targetLat) {
+		return buildLearned(srcHists, targetLon, targetLat, mergePolicy);
+	}
+
+	private SimpleSpatialHistogramOpt buildLearned(SimpleSpatialHistogramOpt[] srcHists, int targetLon,
+			int targetLat, MergePolicy mergePolicy) {
 		double[] lon = distinctBoundaries(srcHists, true);
 		double[] lat = distinctBoundaries(srcHists, false);
 		SimpleSpatialHistogramOpt aligned = new SimpleSpatialHistogramOpt(MinMinLon, MinMinLat, MaxMaxLon,
@@ -371,6 +395,7 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		boolean reproduceAuthors = false;
 		String modelPath = null;
 		String mergePolicyPath = null;
+		String strategyPath = null;
 		GateOptions gate = new GateOptions();
 		boolean gateWanted = false;
 
@@ -395,6 +420,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 				reproduceAuthors = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-modelPath")) {
 				modelPath = emptyToNull(args[++i]);
+			} else if (args[i].equals("-mergeStrategy")) {
+				strategyPath = emptyToNull(args[++i]);
 			} else if (args[i].equals("-mergePolicy")) {
 				mergePolicyPath = emptyToNull(args[++i]);
 			} else if (args[i].equals("-gate")) {
@@ -428,6 +455,6 @@ public class ErrorPredictionLogExp extends CountHistExp {
 				+ outDir + " end=" + end + " step=" + step + " fixStride=" + fixStride + " reproduceAuthors="
 				+ reproduceAuthors + " modelPath=" + modelPath + " mergePolicy=" + mergePolicyPath);
 		new ErrorPredictionLogExp(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride,
-				reproduceAuthors, modelPath, gateWanted || gate.rawFallback ? gate : null, mergePolicyPath);
+				reproduceAuthors, modelPath, gateWanted || gate.rawFallback ? gate : null, mergePolicyPath, strategyPath);
 	}
 }

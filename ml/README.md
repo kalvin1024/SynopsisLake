@@ -191,6 +191,33 @@ ARM (Java, same queries):
 | authors' US data | the dataset's own queries (3 seeds) | -8% to -25% |
 | global OSM sample | the dataset's own queries (3 seeds) | about -14% |
 
+**Guardrail: choose per dataset.** The learned policy is an option. `select` compares three ways of reshaping on the
+dataset's validation queries (a split the policy never trained on): ARM, the simple rule "merge the pair of buckets with
+the fewest points" (`mass`), and the learned policy. It picks the lowest mean error among the strategies that are no
+worse than ARM by more than `--tolerance` (default 2%) in any of the small / medium / large query-size thirds; ARM is
+always eligible, so nothing is adopted without evidence. It then repeats the comparison on the held-out test queries:
+
+```
+python ml/merge_policy.py select out/ml/authors_range data/ml/authors_range out/merge_policy [--model M] [--tolerance 0.02]
+```
+
+It writes `merge_strategy.properties` (`strategy=arm|mass|learned`, `model=` relative to the file) and
+`merge_strategy_report.csv`. Build the synopses with the choice: `-mergeStrategy out/merge_policy/merge_strategy.properties`
+writes `selected_<res>.txt` (ARM's histogram when `arm`). `-mergePolicy mass` runs the simple rule alone. Validation
+queries are the dataset's own workload, so re-run `select` when the workload changes.
+
+Result on the three datasets tried (mean relative error, resolutions at or below 73% of full, held-out test queries):
+
+| dataset | ARM | mass rule | learned | chosen |
+|---|---|---|---|---|
+| authors' US data | 0.538 | 0.613 (+28% on small queries: rejected) | 0.411 | learned |
+| global OSM sample (fine sources) | 0.291 | 0.270 | 0.266 | learned |
+| spatial join | 0.270 | 0.188 | 0.180 | learned |
+
+On the OSM and spatial-join data the mass rule gets most of the gain on its own, so the margin of the model over the
+rule is small there (0.270 vs 0.266 and 0.188 vs 0.180). The guardrail takes the lowest error, but if you want to avoid
+a model you can pass `-mergePolicy mass` directly.
+
 Caveats: it is trained per dataset and needs a pass over the raw points for exact counts. With synthetic training the
 policy is about 1-2% *worse* than ARM at the very lightest merge rates (just below full resolution). Training on one
 query size and testing on another was 3-4x worse than ARM on the authors' data (not on the OSM data), so train on a
