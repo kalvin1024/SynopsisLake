@@ -23,6 +23,8 @@ dbutils.widgets.text("volume", VOL)  # noqa: F821
 dbutils.widgets.text("dataset", "authors_range")  # noqa: F821
 dbutils.widgets.dropdown("reproduce_authors", "true", ["true", "false"])  # noqa: F821
 dbutils.widgets.dropdown("fix_stride", "false", ["true", "false"])  # noqa: F821
+dbutils.widgets.text("model_path", "")  # noqa: F821  optional: model.txt (adds learnedErr to rows.csv)
+dbutils.widgets.text("cutoffs_path", "")  # noqa: F821  optional: cutoffs.csv (adds gated.csv, the query-path gate)
 get = dbutils.widgets.get  # noqa: F821
 
 volume, dataset = get("volume"), get("dataset")
@@ -41,6 +43,10 @@ cmd = ["java", "-cp", f"{jar}:{math3[0]}", "sigspatial25.ErrorPredictionLogExp",
        "-dataDir", data_dir + "/", "-numFile", "4", "-srcRes", "40,56,32,48", "-queryFile", query_file,
        "-outDir", out_dir, "-end", "42", "-step", "8",
        "-reproduceAuthors", get("reproduce_authors"), "-fixStride", get("fix_stride")]
+if get("model_path"):
+    cmd += ["-modelPath", get("model_path")]
+if get("cutoffs_path"):
+    cmd += ["-cutoffs", get("cutoffs_path"), "-eps", "0.10", "-delta", "0.05"]
 print(" ".join(cmd))
 r = subprocess.run(cmd, capture_output=True, text=True)
 print("\n".join(ln for ln in r.stdout.splitlines() if ln.startswith(("canonical", "mergeRate", "dataDir"))))

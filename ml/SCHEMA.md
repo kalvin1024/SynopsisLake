@@ -34,6 +34,7 @@ method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,ce
 | `overlapSum` | answer[3]: sum of query/cell overlap ratios (0 if the query misses the histogram) |
 | `cellsTouched` | answer[4]: number of cells the query overlaps |
 | `srcSumEst` | sum over the source histograms of their answer[0] (reading every source, no merge) |
+| `learnedErr` | only with `-modelPath`: the learned model's estimate of `relErr` (see "Learned error predictor") |
 
 The canonical resolution is the number of distinct source boundaries minus one per axis
 (178 x 179 for sources 40, 56, 32, 48). Merge rates run from the canonical lon resolution down to
@@ -73,6 +74,7 @@ line 4+  one row of counts per lon bucket (latRes values each)
 | `-outDir` | `../out/ml/authors_range/` | run folder |
 | `-end`, `-step` | 42, 8 | last lon resolution and step |
 | `-fixStride` | false | use `j * data[0].length + k` instead of `j * data.length + k` for the beta densities |
+| `-modelPath` | none | LightGBM `model.txt`; adds the `learnedErr` column |
 | `-reproduceAuthors` | false | reload the sources at every merge rate like `DataDrivenRangeQueryMergingRateExp`; the global bounds then widen by 1e-6 per reload, which reproduces `DataDrivenQueryAvgRelError.txt` (`ourLH`) exactly |
 
 Local run (from the repo root, after `gunzip -k range_query/2.csv.gz range_query/3.csv.gz` and
@@ -84,3 +86,119 @@ java -cp SynopsisLake/target/SynopsisLake-0.0.1-SNAPSHOT.jar:<commons-math3.jar>
 python ml/prepare_authors_range.py range_query/dataDrivenQuery/srcQuery-40-56-32-48-Ans.csv data/ml/authors_range
 python ml/train_v0_local.py out/ml/authors_range data/ml/authors_range
 ```
+
+## Learned error predictor (Java, package `predictor`)
+
+Replaces the Skewness-Align score (`predErr`) with a trained LightGBM regression model. Any `model.txt` from
+`Booster.save_model` works: the feature list and order come from the file, so a model with other features, or
+without `skew_pred` / `log_alpha`, needs no code change.
+
+```java
+ErrorPredictor p = LearnedErrorPredictor.load("model.txt");          // or new SkewnessAlignPredictor()
+QueryErrorEstimator est = p.bind(new SynopsisContext(merged, sources, mergeRate, beta));
+double err = est.estimate(minLon, maxLon, minLat, maxLat);           // estimated relative error
+```
+
+- `beta` (the merged histogram's beta distribution) is only read by Skewness-Align and by models that use
+  `skew_pred` / `log_alpha`; pass `null` for other models.
+- `FeatureRegistry` maps each feature name to its Java code (all of `features.py` and `features_v1.py`). A model
+  that names an unknown feature is rejected at load; add new ones with `FeatureRegistry.register`. A Java
+  feature must give the training code's value.
+- Optional `model.properties` next to the model: `label.transform` = `log` (default, the model predicts
+  `log(relErr)` as in `features.build_table`) or `identity`; `gate.cutoff` = calibrated cutoff, used by
+  `ErrorGate` (`useSynopsis(err)` is true at or below it). The cutoff is not in `model.txt`; take it from
+  `gate_eval.cutoff`.
+- Not supported (rejected at load): non-regression objectives, multiclass, linear trees.
+
+Check a model against LightGBM itself:
+
+```
+java -cp ... sigspatial25.ErrorPredictionLogExp ... -modelPath model.txt -outDir out/ml/authors_range
+python ml/check_java_parity.py out/ml/authors_range data/ml/authors_range model.txt
+```
+
+Features differ from numpy in the last bit, so a model that has split on rounding noise sends a few rows
+(0.1% for the v0 model) down another path; rank and AUC are unchanged.
+
+## Query path: gated answers (`predictor.GatedRangeQuery`)
+
+Answers a range count from the merged synopsis when the predictor trusts it, from the raw data otherwise, and
+returns the answer with its estimated relative error. Training and calibration stay in Databricks; the Java side
+takes three inputs: a model (or none for Skewness-Align), a cutoff, and optionally the raw data.
+
+```java
+ErrorPredictor p = PredictorFactory.predictor("model.txt", null);              // null model = Skewness-Align
+CutoffTable cutoffs = PredictorFactory.cutoffs("cutoffs.csv", null, 0.10, 0.05, p);
+GatedRangeQuery q = new GatedRangeQuery(new SynopsisContext(merged, sources, mergeRate, beta), p,
+        cutoffs.forMergeRate(mergeRate), PointScanCounter.fromFiles(dataFiles));   // raw counter may be null
+ApproxAnswer a = q.answer(minLon, maxLon, minLat, maxLat);   // a.answer, a.fromSynopsis, a.estimatedRelError, ...
+```
+
+`cutoffs.csv` (one cutoff per merge rate, from `gate_eval.cutoff` on calibration queries): header, then rows.
+
+| column | |
+|---|---|
+| `mergeRate` | the merge rate the cutoff is for; without this column the file has one row for every rate |
+| `cutoff` | number, or `inf` / `-inf` (`-inf` = always read the raw data at that rate) |
+| `eps`, `delta` | optional; rows are picked by `-eps` / `-delta` |
+
+A merge rate with no row uses `-cutoff` or `gate.cutoff` from `model.properties`, and is an error if neither is set.
+`estimatedRelError` is the model's estimate whenever the answer is the synopsis estimate (also for a rejected query
+when no raw data is read), 0 for an exact raw answer, and NaN for Skewness-Align, whose score is not a relative error.
+
+`ErrorPredictionLogExp` runs the gate for every merge rate and query when given `-cutoffs <csv>` or `-cutoff <x>`
+(or `-gate true` to use `gate.cutoff`):
+
+| flag | default | |
+|---|---|---|
+| `-cutoffs`, `-cutoff` | none | per-merge-rate file, single value |
+| `-eps`, `-delta` | none | pick rows of a `cutoffs.csv` that has several |
+| `-gatePredictor` | `learned` if `-modelPath` is given, else `skew` | `skew` gates with Skewness-Align even when a model is given |
+| `-rawFallback` | false | read the raw points (the numFile data files) for queries sent to the raw data; false only records the decision |
+
+It writes `gated.csv`, one row per (merge rate, query): `method,mergeRate,qId,gt,answer,fromSynopsis,errorScore,
+cutoff,estRelErr,relErr,gateNs,synNs,rawNs`. `relErr` is the error of `answer` (0 for a raw answer), so the share of
+rows with `fromSynopsis` and `relErr > eps` is the observed violation, and the `*Ns` columns give the latency.
+
+## Answering from saved synopses (`sigspatial25.ApproxQueryExp`)
+
+Gives approximate answers with estimated relative errors from a run folder alone (`src_*.txt`, `arm_*.txt`), a
+model and a cutoff, with no raw data. `predictor.SynopsisStore` loads the folder; the answers match the logger's
+`rows.csv` exactly (est, `learnedErr` and `predErr` checked on the authors dataset).
+
+```
+java -cp SynopsisLake.jar:commons-math3.jar sigspatial25.ApproxQueryExp \
+  -runDir out/ml/authors_range -queryFile queries.csv -outFile out/approx.csv \
+  -modelPath model.txt -cutoffs cutoffs.csv -eps 0.10 -delta 0.05 -mergeRate 0.5
+```
+
+`queries.csv` has `minLon,maxLon,minLat,maxLat[,exact]` per line. `approx.csv` has
+`qId,mergeRate,answer,fromSynopsis,estRelError,errorScore,cutoff,gateNs,synNs,rawNs,exact,relErr` (`exact` and `relErr`
+are empty when the queries have no count). `python ml/to_parquet.py out/approx.csv` converts it to Parquet.
+
+| flag | default | |
+|---|---|---|
+| `-runDir`, `-queryFile` | required | |
+| `-outFile` | `approx.csv` | |
+| `-modelPath`, `-propsPath` | none | no model = Skewness-Align; `model.properties` next to the model is read |
+| `-cutoffs`, `-cutoff` | none | else `gate.cutoff` from the properties; `-eps` / `-delta` pick rows of `cutoffs.csv` |
+| `-mergeRate` | | answer from the nearest merged synopsis |
+| `-plan true`, `-planQueryFile` | | instead of `-mergeRate`: pick the smallest merge rate that meets eps/delta on queries with exact counts (`predictor.MergeRatePlanner`); table in `<outFile>.plan.csv`; `-minCoverage` (0.01), `-minExact` (10) |
+| `-rawFallback true`, `-dataDir`, `-numFile` | false | read the raw points for rejected queries |
+
+With `-plan true` and no qualifying rate the program says so and exits with status 2 (or answers everything from the
+raw data when `-rawFallback true`). Plan with queries that were not used to calibrate the cutoffs; the violation is
+optimistic otherwise.
+
+## Gate artifacts from the training side (`ml/gate_artifacts.py`)
+
+`write_gate_artifacts(model, FEATURES, df, out_dir, seed)` calibrates one cutoff per merge rate on the calibration
+queries (same 50/20/30 split as notebook 02) for each eps, and writes `cutoffs.csv`, `model.properties`
+(`label.transform`, pooled `gate.cutoff`) and `gate_report.csv` (held-out coverage and violation per rate). Notebook 02
+now calls it and logs the three files to MLflow next to `model.txt`. For any saved model:
+
+```
+python ml/gate_artifacts.py out/ml/authors_range data/ml/authors_range model.txt out/gate --seed 0
+```
+
+Put `model.txt` and `model.properties` in one folder and pass `cutoffs.csv` with `-cutoffs`.

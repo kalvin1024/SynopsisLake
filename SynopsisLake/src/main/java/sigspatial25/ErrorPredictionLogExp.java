@@ -9,6 +9,16 @@ import java.util.TreeSet;
 import org.apache.commons.math3.distribution.BetaDistribution;
 
 import histogram.SimpleSpatialHistogramOpt;
+import predictor.ApproxAnswer;
+import predictor.CutoffTable;
+import predictor.ErrorPredictor;
+import predictor.GatedRangeQuery;
+import predictor.LearnedErrorPredictor;
+import predictor.PointScanCounter;
+import predictor.PredictorFactory;
+import predictor.QueryErrorEstimator;
+import predictor.RawRangeCounter;
+import predictor.SynopsisContext;
 import utils.UtilsFunction;
 
 /**
@@ -23,20 +33,59 @@ import utils.UtilsFunction;
  * (each reload widens the global bounds by varepsilon again), which reproduces
  * dataDrivenQuery/results/DataDrivenQueryAvgRelError.txt exactly. -fixStride true computes the beta
  * distribution with the correct row stride (data[0].length instead of data.length).
+ *
+ * -modelPath <model.txt> also scores every query with that LightGBM model (predictor.LearnedErrorPredictor)
+ * and adds a learnedErr column: the model's estimate of the relative error, to be compared with predErr.
+ *
+ * Gate (query path, predictor.GatedRangeQuery): with a cutoff (-cutoffs <cutoffs.csv> per merge rate and/or
+ * -cutoff <value>, or gate.cutoff in model.properties with -gate true) every query is also run through the gate and one row per
+ * (merge rate, query) goes to gated.csv: the answer returned, whether it came from the synopsis or the raw data,
+ * the estimated relative error, and the time spent on each step. The gate uses the model given by -modelPath, or
+ * Skewness-Align when none is given (or -gatePredictor skew). -rawFallback true reads the raw points (the
+ * numFile data files) for queries sent to the raw data; false only records the decision. -eps and -delta pick
+ * rows when cutoffs.csv has several.
  */
 public class ErrorPredictionLogExp extends CountHistExp {
 
 	String outDir;
 	boolean reproduceAuthors;
 	boolean fixStride;
+	ErrorPredictor learned;
+	ErrorPredictor gatePredictor;
+	CutoffTable cutoffs;
+	RawRangeCounter rawCounter;
 
 	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
-			int end, int step, boolean fixStride, boolean reproduceAuthors) throws IOException {
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath) throws IOException {
+		this(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride, reproduceAuthors, modelPath, null);
+	}
+
+	public ErrorPredictionLogExp(String dataDir, int numFile, int[] srcRes, String queryFile, String outDir,
+			int end, int step, boolean fixStride, boolean reproduceAuthors, String modelPath, GateOptions gate)
+			throws IOException {
 		super(dataDir.endsWith("/") ? dataDir : dataDir + "/", "", numFile, 2, 0.5, queryFile);
 		setSrcResolution(srcRes);
 		this.outDir = outDir.endsWith("/") ? outDir : outDir + "/";
 		this.fixStride = fixStride;
 		this.reproduceAuthors = reproduceAuthors;
+		this.learned = modelPath == null ? null : LearnedErrorPredictor.load(modelPath);
+		if (gate != null) {
+			this.gatePredictor = gate.skewPredictor ? PredictorFactory.predictor(null, null)
+					: (learned != null ? learned : PredictorFactory.predictor(null, null));
+			this.cutoffs = PredictorFactory.cutoffs(gate.cutoffsPath, gate.cutoff, gate.eps, gate.delta,
+					this.gatePredictor);
+			if (this.cutoffs == null) {
+				throw new IllegalArgumentException(
+						"gate needs -cutoffs, -cutoff, or gate.cutoff in the model's properties");
+			}
+			if (gate.rawFallback) {
+				ArrayList<String> files = new ArrayList<String>();
+				for (int f = 0; f < numFile; f++) {
+					files.add(this.dataDirWithSlash(dataDir) + f + ".csv");
+				}
+				this.rawCounter = PointScanCounter.fromFiles(files);
+			}
+		}
 		new File(this.outDir).mkdirs();
 
 		SimpleSpatialHistogramOpt[] srcHists = loadSynopsisFromData();
@@ -50,8 +99,14 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		ArrayList<double[]> rangeQueries = loadRangeQuery(queryFile);
 		FileWriter rows = new FileWriter(this.outDir + "rows.csv");
 		rows.write("method,mergeRate,lonRes,latRes,qId,gt,est,relErr,predErr,betaAlpha,overlapSum,"
-				+ "cellsTouched,srcSumEst\n");
+				+ "cellsTouched,srcSumEst" + (learned == null ? "" : ",learnedErr") + "\n");
 
+		FileWriter gated = null;
+		if (cutoffs != null) {
+			gated = new FileWriter(this.outDir + "gated.csv");
+			gated.write("method,mergeRate,qId,gt,answer,fromSynopsis,errorScore,cutoff,estRelErr,relErr,"
+					+ "gateNs,synNs,rawNs\n");
+		}
 		boolean first = true;
 		for (int lonRes = canonicalLon; lonRes >= end; lonRes -= step) {
 			lonTargetResolution = lonRes;
@@ -68,10 +123,50 @@ public class ErrorPredictionLogExp extends CountHistExp {
 			SimpleSpatialHistogramOpt arm = buildArm(srcHists);
 			writeHist(this.outDir + "arm_" + lonRes + ".txt", arm, mergeRate);
 			double meanRelErr = logQueries(rows, rangeQueries, srcHists, arm);
+			if (gated != null) {
+				logGated(gated, rangeQueries, srcHists, arm);
+			}
 			System.out.println(String.format("mergeRate %.1f%%, lonRes %d: mean relErr %.3f", mergeRate * 100,
 					lonRes, meanRelErr));
 		}
 		rows.close();
+		if (gated != null) {
+			gated.close();
+		}
+	}
+
+	private String dataDirWithSlash(String dataDir) {
+		return dataDir.endsWith("/") ? dataDir : dataDir + "/";
+	}
+
+	/** Gate options for the query path; null fields mean not given. */
+	public static class GateOptions {
+		public String cutoffsPath;
+		public Double cutoff;
+		public Double eps;
+		public Double delta;
+		public boolean skewPredictor;
+		public boolean rawFallback;
+	}
+
+	private void logGated(FileWriter out, ArrayList<double[]> rangeQueries, SimpleSpatialHistogramOpt[] srcHists,
+			SimpleSpatialHistogramOpt arm) throws IOException {
+		GatedRangeQuery gate = new GatedRangeQuery(
+				new SynopsisContext(arm, srcHists, mergeRate, beta(arm)),
+				gatePredictor, cutoffs.forMergeRate(mergeRate), rawCounter);
+		StringBuilder sb = new StringBuilder();
+		for (int qId = 0; qId < rangeQueries.size(); qId++) {
+			double[] q = rangeQueries.get(qId);
+			double gt = q[4];
+			ApproxAnswer a = gate.answer(q[0], q[1], q[2], q[3]);
+			sb.setLength(0);
+			sb.append("ARM,").append(mergeRate).append(',').append(qId).append(',').append(gt).append(',')
+					.append(a.answer).append(',').append(a.fromSynopsis).append(',').append(a.errorScore).append(',')
+					.append(a.cutoff).append(',').append(a.estimatedRelError).append(',')
+					.append(Math.abs(gt - a.answer) / gt).append(',').append(a.gateNanos).append(',')
+					.append(a.synopsisNanos).append(',').append(a.rawNanos).append('\n');
+			out.write(sb.toString());
+		}
 	}
 
 	/** Same steps as DataDrivenRangeQueryMergingRateExp.mergedPrecisionExp for alignCombineHist. */
@@ -93,6 +188,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		for (int sId = 0; sId < srcHists.length; sId++) {
 			betaSrc[sId] = beta(srcHists[sId]);
 		}
+		QueryErrorEstimator learnedErr = learned == null ? null
+				: learned.bind(new SynopsisContext(arm, srcHists, mergeRate, betaArm));
 		int lonRes = arm.getLonBoundary().length - 1;
 		int latRes = arm.getLatBoundary().length - 1;
 		double totalRelErr = 0;
@@ -114,7 +211,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 					.append(qId).append(',').append(gt).append(',').append(ans[0]).append(',').append(relErr)
 					.append(',').append(ans[2]).append(',').append(betaArm.getAlpha()).append(',')
 					.append(ans.length > 3 ? ans[3] : 0.0).append(',').append(ans.length > 4 ? (int) ans[4] : 0)
-					.append(',').append(srcSum).append('\n');
+					.append(',').append(srcSum);
+			if (learnedErr != null) {
+				sb.append(',').append(learnedErr.estimate(q[0], q[1], q[2], q[3]));
+			}
+			sb.append('\n');
 			rows.write(sb.toString());
 		}
 		return totalRelErr / rangeQueries.size();
@@ -183,6 +284,11 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		return out;
 	}
 
+	/** An unset job parameter arrives as an empty string. */
+	private static String emptyToNull(String s) {
+		return s.isEmpty() ? null : s;
+	}
+
 	public static void main(String[] args) throws IOException {
 		String dataDir = "../range_query/";
 		int numFile = 4;
@@ -193,6 +299,9 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		int step = 8;
 		boolean fixStride = false;
 		boolean reproduceAuthors = false;
+		String modelPath = null;
+		GateOptions gate = new GateOptions();
+		boolean gateWanted = false;
 
 		for (int i = 0; i < args.length; i++) {
 			if (args[i].equals("-dataDir")) {
@@ -213,6 +322,28 @@ public class ErrorPredictionLogExp extends CountHistExp {
 				fixStride = Boolean.parseBoolean(args[++i]);
 			} else if (args[i].equals("-reproduceAuthors")) {
 				reproduceAuthors = Boolean.parseBoolean(args[++i]);
+			} else if (args[i].equals("-modelPath")) {
+				modelPath = emptyToNull(args[++i]);
+			} else if (args[i].equals("-gate")) {
+				gateWanted = Boolean.parseBoolean(args[++i]);
+			} else if (args[i].equals("-cutoffs")) {
+				gate.cutoffsPath = emptyToNull(args[++i]);
+				gateWanted = gate.cutoffsPath != null;
+			} else if (args[i].equals("-cutoff")) {
+				gate.cutoff = Double.valueOf(args[++i]);
+				gateWanted = true;
+			} else if (args[i].equals("-eps")) {
+				gate.eps = Double.valueOf(args[++i]);
+			} else if (args[i].equals("-delta")) {
+				gate.delta = Double.valueOf(args[++i]);
+			} else if (args[i].equals("-gatePredictor")) {
+				String g = args[++i];
+				if (!g.equals("skew") && !g.equals("learned")) {
+					throw new IllegalArgumentException("-gatePredictor must be skew or learned, got " + g);
+				}
+				gate.skewPredictor = g.equals("skew");
+			} else if (args[i].equals("-rawFallback")) {
+				gate.rawFallback = Boolean.parseBoolean(args[++i]);
 			} else {
 				throw new IllegalArgumentException("unknown argument " + args[i]);
 			}
@@ -222,8 +353,8 @@ public class ErrorPredictionLogExp extends CountHistExp {
 		}
 		System.out.println("dataDir=" + dataDir + " numFile=" + numFile + " queryFile=" + queryFile + " outDir="
 				+ outDir + " end=" + end + " step=" + step + " fixStride=" + fixStride + " reproduceAuthors="
-				+ reproduceAuthors);
+				+ reproduceAuthors + " modelPath=" + modelPath);
 		new ErrorPredictionLogExp(dataDir, numFile, srcRes, queryFile, outDir, end, step, fixStride,
-				reproduceAuthors);
+				reproduceAuthors, modelPath, gateWanted || gate.rawFallback ? gate : null);
 	}
 }
