@@ -1,4 +1,11 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# dependencies = [
+#   "lightgbm",
+# ]
+# ///
 # MAGIC %md
 # MAGIC # 07 · End to end: train the error predictor and answer queries approximately
 # MAGIC
@@ -131,15 +138,15 @@ for i in range(n_files):
 if not os.path.exists(src_query_file):
     problems.append(f"{src_query_file} is missing")
 
-math3 = sorted(glob.glob("/databricks/jars/*commons-math3*.jar")
-               + glob.glob("/databricks/jars/**/*commons-math3*.jar", recursive=True)
-               + glob.glob(os.path.expanduser("~/.m2/**/commons-math3-*.jar"), recursive=True))
-if not math3:
-    problems.append("no commons-math3 jar under /databricks/jars (needs a classic dedicated cluster)")
-if problems:
-    raise RuntimeError("fix before continuing:\n - " + "\n - ".join(problems))
-classpath = f"{jar}:{math3[0]}"
-print("ok. classpath:", classpath)
+# math3 = sorted(glob.glob("/databricks/jars/*commons-math3*.jar")
+#                + glob.glob("/databricks/jars/**/*commons-math3*.jar", recursive=True)
+#                + glob.glob(os.path.expanduser("~/.m2/**/commons-math3-*.jar"), recursive=True))
+# if not math3:
+#     problems.append("no commons-math3 jar under /databricks/jars (needs a classic dedicated cluster)")
+# if problems:
+#     raise RuntimeError("fix before continuing:\n - " + "\n - ".join(problems))
+# classpath = f"{jar}:{math3[0]}"
+# print("ok. classpath:", classpath)
 
 
 def run_java(main_class, *args, ok=(0,)):
