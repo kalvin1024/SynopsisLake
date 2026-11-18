@@ -90,6 +90,8 @@ def show(df):
 
 # COMMAND ----------
 
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import warnings  # noqa: E402
 
@@ -194,16 +196,21 @@ pd.concat(importances).to_csv(f"{report_dir}/v1_importance.csv", index=False)
 for name, (model, imp) in models.items():
     out = f"{run_dir}/models/{name}"
     os.makedirs(out, exist_ok=True)
-    model.booster_.save_model(f"{out}/model.txt")
-    imp.to_csv(f"{out}/importance.csv", index=False)
-    rep = write_gate_artifacts(model, VARIANTS[name], df, out, SEEDS[0])
+    # LightGBM's save_model reopens the file in append mode, which Unity Catalog volumes do not support:
+    # write to local disk first (as notebook 02 does), then copy the files to the volume.
+    with tempfile.TemporaryDirectory() as tmp:
+        model.booster_.save_model(f"{tmp}/model.txt")
+        imp.to_csv(f"{tmp}/importance.csv", index=False)
+        rep = write_gate_artifacts(model, VARIANTS[name], df, tmp, SEEDS[0])
+        for f in os.listdir(tmp):
+            shutil.copyfile(f"{tmp}/{f}", f"{out}/{f}")
+        if mlflow is not None:
+            with mlflow.start_run(run_name=f"v1-{dataset}-{name}-model-seed{SEEDS[0]}"):
+                mlflow.log_params({"dataset": dataset, "variant": name, "seed": SEEDS[0],
+                                   "features": ",".join(VARIANTS[name])})
+                mlflow.log_artifacts(tmp)
     print(f"{name}: wrote {out} ({len(VARIANTS[name])} inputs, seed {SEEDS[0]})")
     show(rep[rep.eps.isin([0.1, 0.25])].groupby("eps")[["coverage", "violation"]].mean().round(3).reset_index())
-    if mlflow is not None:
-        with mlflow.start_run(run_name=f"v1-{dataset}-{name}-model-seed{SEEDS[0]}"):
-            mlflow.log_params({"dataset": dataset, "variant": name, "seed": SEEDS[0],
-                               "features": ",".join(VARIANTS[name])})
-            mlflow.log_artifacts(out)
 
 # COMMAND ----------
 
