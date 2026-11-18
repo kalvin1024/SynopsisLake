@@ -1,0 +1,17 @@
+{
+  "purpose": "Frozen independent numerical reference extracted verbatim from retained R08 notebook; never imports the implementation under test",
+  "origin_repository": "https://github.com/kywang0906/SynopsisLake",
+  "origin_commit": "fc6db0d570b2dab6e4ff8a5e9b056e866575385c",
+  "origin_notebook": "ml/notebooks/R08_compact_distribution_critic.ipynb",
+  "origin_notebook_git_blob": "008a3fb53c564d25bcf3b6cd848b3fe4d6ade1ef",
+  "origin_notebook_sha256": "dfd0a2a682d3423e6104212331c0855830206f47b65a1def540e0995434ae6fb",
+  "cell_index_zero_based": 11,
+  "cell_id": "compact-distribution-11",
+  "cell_source_sha256": "e9f81140b06a27e3c655c5b90b80987c1f701d467e78b40fe08d5d838f84a06b",
+  "embedded_helper": "analytic_moments_fast.py",
+  "extraction": "ast.literal_eval of the sole top-level assignment; output is the exact UTF-8 module string, without edits or a wrapper",
+  "reference_source": "r08_reference.py",
+  "reference_source_bytes": 8463,
+  "reference_source_sha256": "6102c3feecf3f67139e3a08a3aa0df5471f52bdc899c11674cc5c23b9cf520cc",
+  "live_implementation_dependency": false
+}

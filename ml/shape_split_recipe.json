@@ -1,0 +1,40 @@
+{
+  "recipe": "source-size-center-groups-v1_50-20-30",
+  "team_reference_commit": "d8096726fb3faf34fb3dc807a2e3cb25c560a895",
+  "reference_functions": {
+    "model_study.py::source_cells": {
+      "file_sha256": "a22a7d8b4e6e4773dc2ce6bbe1f61d187e97fa38b1d68291c428952dc414a0f7",
+      "function_source_sha256": "db70d938b1b3e8dd8f743f60fa38c6229d2e3477cd04878ffab05bae8973b024",
+      "source_lines": [
+        37,
+        59
+      ]
+    },
+    "gate_eval.py::split_ids": {
+      "file_sha256": "743c7cfc112dceed2bce935820962d0e5bdfc74d23631afc54b05cc89b18edbe",
+      "function_source_sha256": "5346e4a0504f9952478afad40a982cdfa05a1e27f744a1b9eeaf3e877dfdb5ac",
+      "source_lines": [
+        22,
+        26
+      ]
+    }
+  },
+  "historical_authors_r10": {
+    "queries_sha256": "ea6966624333d87f930072183c575e50e2f24c033a29c7b1a21e97ea9b542cfa",
+    "source_sha256": {
+      "src_0.txt": "1be556d7eae5d4707510f7f07ec63099ba733714edc883e4146736a2cd684427",
+      "src_1.txt": "3d56ba797abca600ed663834c450a9ccff9c22e946469f1c921c5f0da0cd99f8",
+      "src_2.txt": "3a6f137717443b7082f7188ac8ab00530d3606a64febb67c0994589f7796ee12",
+      "src_3.txt": "68b7b7915eb0c8044be60615c121d833f19b0e43ba725be1c6c3403d4b85f625"
+    },
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "min_exact": 10,
+    "eligible_queries": 31914,
+    "outer_splits_sha256": "a542b247f8dac0062681f0e4a1ea366bc670e4a6218d2d2eb64c9ac1e02acd64"
+  },
+  "scope": "Reference hashes describe the recorded source algorithms; generated roles use no query outcomes other than the fixed offline eligibility cohort. Exact reproduction is asserted only when all historical inputs/seeds/min_exact and resulting split bytes match."
+}
