@@ -195,6 +195,6 @@ plt.tight_layout()
 fig.savefig(f"{report_dir}/gate_risk_coverage.png", dpi=150)
 plt.show()
 
-pick = rc[rc.coverage.round(2).isin([0.1, 0.25, 0.5, 0.75])].pivot(index="coverage", columns="score", values="mean_error")
+pick = rc[rc.coverage.round(2).isin([0.1, 0.3, 0.5, 0.7])].pivot(index="coverage", columns="score", values="mean_error")
 show(pick[list(NAMES)].round(4).reset_index())
 print(f"wrote gate_eps_sweep.csv/.png and gate_risk_coverage.csv/.png to {report_dir}")
