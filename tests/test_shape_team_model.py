@@ -53,8 +53,9 @@ def import_v1_reference():
     path = Path(features.__file__).with_name("features_v1.py")
     spec = importlib.util.spec_from_file_location("team_v1_test_reference", path)
     module = importlib.util.module_from_spec(spec)
-    # This is deliberately the unmodified team function, including its source
-    # aggregation and logged-Java merge shift. No adapter implementation is used.
+    # This is the unmodified team function. The synthetic fixture supplies
+    # Python-computed estimates in its logged-field slots: this checks formula
+    # consistency, not bitwise parity with actual Java-generated feature logs.
     with patch.dict(sys.modules, {"features": features}):
         spec.loader.exec_module(module)
     return module
@@ -68,7 +69,7 @@ class TeamFeatureParityTests(unittest.TestCase):
         self.histograms, self.dataset, self.merged, self.queries = fixture(self.root)
         self.runtime = team.TeamV1Runtime(self.histograms, base_resolution=3)
 
-    def test_live28_matches_unmodified_team_v1_table(self):
+    def test_live28_matches_team_formulas_on_reconstructed_fixture(self):
         reference = import_v1_reference()
         expected = reference.build_table_v1(self.histograms, self.dataset)
         self.assertEqual(tuple(reference.FEATURES_V1), team.TEAM_FEATURES)
