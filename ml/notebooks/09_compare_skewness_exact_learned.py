@@ -279,6 +279,18 @@ timing = pd.DataFrame(runs)
 
 # COMMAND ----------
 
+from sklearn.metrics import roc_auc_score  # noqa: E402
+
+def score_auc(a, rate):
+    """AUC of the setup's error score at telling queries whose synopsis answer is over eps from those that are not.
+    Uses every query (also the ones sent to raw data), so it does not depend on the cutoff or on coverage."""
+    rows = df[np.isclose(df.mergeRate.astype(float), rate)][["qId", "relErr"]]
+    # the answers' qId is the line in the sampled query file; map it back to the dataset's query id
+    m = a[["qId", "errorScore"]].assign(qId=test_ids[a.qId.to_numpy()]).merge(rows, on="qId")
+    bad = m.relErr > eps
+    return float(roc_auc_score(bad, m.errorScore)) if bad.nunique() == 2 else np.nan
+
+
 records = []
 for setup in ("skewness", "learned", "exact"):
     for rate in ([None] if setup == "exact" else rates):
@@ -290,7 +302,10 @@ for setup in ("skewness", "learned", "exact"):
             "coverage": float(a.fromSynopsis.mean()) if setup != "exact" else 0.0,
             "mean_error": float(a.relErr.mean()), "p95_error": float(a.relErr.quantile(0.95)),
             "violation": float((syn.relErr > eps).mean()) if len(syn) else np.nan,
+            "synopsis_queries": len(syn),
             "synopsis_mean_error": float(syn.relErr.mean()) if len(syn) else np.nan,
+            "synopsis_p95_error": float(syn.relErr.quantile(0.95)) if len(syn) else np.nan,
+            "score_auc": score_auc(a, rate) if setup != "exact" else np.nan,
             "latency_s": float(t.total_s.median()), "latency_min_s": float(t.total_s.min()),
             "latency_max_s": float(t.total_s.max()), "java_s": float(t.java_s.median()),
             "parquet_s": float(t.parquet_s.median()),
@@ -318,11 +333,19 @@ display(show) if "display" in globals() else print(show.to_string())  # noqa: F8
 # MAGIC
 # MAGIC One table per metric, merge rates down, setups across. For the gated setups the guarantee is that the
 # MAGIC `violation` stays near or below `delta`; with that held, more coverage means fewer raw-data scans.
+# MAGIC
+# MAGIC **Read `mean_error` and `p95_error` with coverage in mind.** They are taken over all queries, and a query sent
+# MAGIC to raw data has error 0, so a gate that accepts almost nothing looks very accurate. `synopsis_*` columns use only
+# MAGIC the queries answered from the synopsis (`synopsis_queries` of them; few queries make the numbers noisy).
+# MAGIC `score_auc` does not depend on the cutoff or coverage: it is how well each setup's error score ranks queries whose
+# MAGIC synopsis answer is over `eps` above those that are not (0.5 = no better than chance).
 
 # COMMAND ----------
 
 gated = summary[summary.setup != "exact"]
-for metric, fmt in (("coverage", "{:.1%}"), ("violation", "{:.1%}"), ("mean_error", "{:.4f}"),
+for metric, fmt in (("coverage", "{:.1%}"), ("violation", "{:.1%}"), ("score_auc", "{:.3f}"),
+                    ("synopsis_queries", "{:.0f}"), ("synopsis_mean_error", "{:.4f}"),
+                    ("synopsis_p95_error", "{:.4f}"), ("mean_error", "{:.4f}"),
                     ("p95_error", "{:.4f}"), ("latency_s", "{:.2f}")):
     p = gated.pivot(index="merge_rate", columns="setup", values=metric).sort_index(ascending=False)
     if metric in ("mean_error", "p95_error", "latency_s"):
