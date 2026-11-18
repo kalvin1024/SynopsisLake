@@ -237,7 +237,7 @@ eps = 0.25
 s = summary.reset_index()
 s = s[s.eps == eps].set_index("variant").reindex(list(VARIANTS))
 fig, ax = plt.subplots(figsize=(8, 4))
-ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std, color="#4C78A8")
+ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std.fillna(0), color="#4C78A8")   # std is NaN with a single seed
 ax.axhline(base.loc[(eps, "oracle"), "coverage_per_rate"], ls="--", color="grey", label="oracle (true error)")
 ax.axhline(base.loc[(eps, "skew_align"), "coverage_per_rate"], ls=":", color="black", label="Skewness-Align")
 ax.set_ylabel("share answered from synopsis")
