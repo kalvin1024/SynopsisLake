@@ -262,12 +262,17 @@ cd SynopsisLake && mvn test
 
 ## 8. Budgeted source-shape assessment (R10)
 
-`notebooks/R10_source_shape_assessment.ipynb` is a focused source-information study. It keeps the original ARM answer
+`notebooks/22_source_shape_assessment.ipynb` is a focused source-information study. It keeps the original ARM answer
 and compares the full 28-feature learner with the same learner plus two R10-reference inputs, or the same two inputs
 from a count grid at the same **sidecar** byte budget. The model family, log-error target, TRAIN roles and stopping
 policy are shared. Native R08, analytic R10, SA and the fine reference remain controls. These are refits at one fixed
 histogram, not the unavailable saved model or the joint multi-rate training run from notebook 12. Model sizes are
 measured separately; matching sidecar bytes does not make fitted model sizes identical.
+
+The filename follows the team sequence after notebook 12. Earlier research labels R01–R09 are now filenames
+13–21 on the historical `experiments/bounded-sidecar-e2e` branch; the latest source-shape notebook is 22 on
+`experiments/source-shape-integration`. Scientific method IDs and saved result names retain their original labels
+so existing frozen artifacts and provenance remain valid.
 
 The live Python adapter reconstructs histogram estimates. The team's original v1 table instead takes some
 merge-shift inputs from Java-logged `est`/`srcSumEst`. Tiny arithmetic differences can change learned tree paths.
