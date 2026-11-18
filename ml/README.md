@@ -326,6 +326,20 @@ Raw text inputs are uncompressed `0.csv...`; gzip inputs are materialized once o
 against original identities. Zero-truth output error is zero for a zero answer and infinity for a positive answer.
 Zero accepted queries have undefined accepted risk. Calibration's empirical 5% target is not a future-risk guarantee.
 
+To diagnose JVM/load amortization **after** a completed Java profile, the optional batch-cost runner retains the
+original small-batch result and executes all 2,048 already-fixed queries, seed 0, with three repetitions. This is an
+explicitly post-hoc operating-regime check, not new method validation or threshold selection. It refuses overwrites
+and verifies the recorded raw/model/gate/profile identities. Prepare the intent, then pass its printed path:
+
+```bash
+python -m ml.shape_java_batch_cost --profile-dir /path/to/completed-java-profile --output-root /path/outside-git
+python -m ml.shape_java_batch_cost --run-dir /path/printed-by-the-first-command
+```
+
+Keep the locked profile at its original paths; to test another environment, first create a new profile there.
+Complete-process and logged query-compute times have different scopes. Report accepted/bad counts with any speedup;
+the observed larger-batch benefit does not imply that the empirical 5% target was achieved.
+
 Python regression checks from the repository root:
 
 ```bash
