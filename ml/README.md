@@ -259,3 +259,75 @@ rejected at load, with the name; add features with `FeatureRegistry.register` (i
 ```
 cd SynopsisLake && mvn test
 ```
+
+## 8. Budgeted source-shape assessment (R10)
+
+`notebooks/R10_source_shape_assessment.ipynb` is a focused source-information study. It keeps the original ARM answer
+and compares the full 28-feature learner with the same learner plus two R10-reference inputs, or the same two inputs
+from a count grid at the same **sidecar** byte budget. The model family, log-error target, TRAIN roles and stopping
+policy are shared. Native R08, analytic R10, SA and the fine reference remain controls. These are refits at one fixed
+histogram, not the unavailable saved model or the joint multi-rate training run from notebook 12. Model sizes are
+measured separately; matching sidecar bytes does not make fitted model sizes identical.
+
+The live Python adapter reconstructs histogram estimates. The team's original v1 table instead takes some
+merge-shift inputs from Java-logged `est`/`srcSumEst`. Tiny arithmetic differences can change learned tree paths.
+Consequently these results concern this explicitly reconstructed-input refit, not the team's original saved model;
+the Python-to-Java transfer discrepancy is not evidence of a defect in that original training pipeline.
+
+R10 saves exact child masses and quantized child-local positional moments for selected source cells. Its source-only
+allocation and Beta/copula integration use established statistical components. This is an experimental representation
+and integration study, not a claim of new probability mathematics, universal superiority, bounded arbitrary-source
+merging or guaranteed future risk.
+
+### Inputs and reproducibility
+
+Set `run_dir` to a real source/ARM export folder from the existing pipeline, or set `histogram_dir`, `queries_file`,
+and `raw_data_dir` explicitly. The grouped-cell membership helper (`shape_split_inputs.py`) reproduces the known
+AUTHORS split byte-for-byte without running historical notebooks. For other inputs it records a newly declared
+cohort. Truth>=10 is an offline eligibility/reporting condition, never a runtime query filter. Outputs go outside Git
+in unique directories. Models, gates and code identities freeze before fresh geometry and labels; every timed fallback
+performs a new raw scan. The independent R08 numerical test reference is a small fixture with provenance, not a
+dependency on an old notebook.
+
+The notebook contains the full workflow, resume fields, three English diagnostic figures and a small review ZIP.
+Model weights remain in `models/seed_<seed>/<method>/`; their measured bytes and hashes remain in the review packet.
+Python-request timing can use an explicit compiled SciPy/C++ backend or the indexed Python backend. Compilation,
+metadata/model initialization, raw loading, first requests, resident requests and local reloads are separate costs.
+Neither backend implies a Databricks/Spark/network latency result.
+
+### Reuse the Java query engine
+
+Build this branch's jar before using the optional Java profile. The existing gate and exact counter are reused:
+
+```bash
+java -cp "$CP" sigspatial25.ApproxQueryExp -mode gated \
+  -runDir out/ml/authors_range -queryFile queries.csv -outFile out/source_shape.csv \
+  -shapeDir out/source_shape/native -shapePacket out/source_shape/shape.bin \
+  -cutoffs out/source_shape/cutoffs.csv -eps 0.25 -delta 0.05 -mergeRate 0.5 \
+  -dataDir range_query -numFile 4 -setupFile out/source_shape/setup.csv
+```
+
+Omitting `-shapePacket` uses native R08. Standalone source shape is mutually exclusive with `-modelPath`. To use a
+properly paired full-v1+R10 model, explicitly add `-augmentShape true -modelPath .../ML_v1_shape/model.txt` alongside
+the shape options. Do **not** pair the `ML_v1_fine` model with source-shape metadata: the two reference types share
+feature names but have different meanings. The locked comparison profile validates model/source identities; manual
+CLI users must preserve that pairing. Optional `critic.reference=source_shape` in a separately managed properties
+file makes the intended family explicit (`fine` is rejected). Do not mutate a frozen model properties file to add it.
+
+`shape_java_comparison.py` invokes this existing CLI for SA, full-v1, R10 and full-v1+R10. It calibrates the Java backend
+on original calibration IDs, freezes all Java scores before fresh truth, and checks every exact/fallback answer.
+The profile's query files contain geometry only; evaluation labels are joined afterward. Native source shape has
+independent numerical parity checks. Learned Python/Java scores are **not assumed identical**: tiny feature rounding
+can change tree paths, so backend differences and separately frozen gates remain explicit.
+
+`-setupFile` records named JVM initialization/query-loop phases. The Java profile reports complete subprocess wall
+time to CSV separately from the sum of logged gate/synopsis/raw times; it does not include Parquet conversion.
+Raw text inputs are uncompressed `0.csv...`; gzip inputs are materialized once outside the repository and checked
+against original identities. Zero-truth output error is zero for a zero answer and infinity for a positive answer.
+Zero accepted queries have undefined accepted risk. Calibration's empirical 5% target is not a future-risk guarantee.
+
+Python regression checks from the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+```

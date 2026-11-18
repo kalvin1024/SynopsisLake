@@ -1,0 +1,101 @@
+{
+  "purpose": "Small synthetic decoder/numerical parity fixture, not a performance or quality experiment",
+  "raw_synthetic_points": [
+    [
+      0.1,
+      0.1
+    ],
+    [
+      0.2,
+      0.15
+    ],
+    [
+      0.4,
+      0.4
+    ],
+    [
+      0.6,
+      0.2
+    ],
+    [
+      0.75,
+      0.25
+    ],
+    [
+      0.1,
+      0.7
+    ],
+    [
+      0.2,
+      0.9
+    ],
+    [
+      0.8,
+      0.9
+    ],
+    [
+      1.25,
+      0.25
+    ],
+    [
+      1.25,
+      0.25
+    ],
+    [
+      1.25,
+      0.25
+    ],
+    [
+      1.1,
+      1.1
+    ],
+    [
+      1.9,
+      1.9
+    ],
+    [
+      1.5,
+      1.8
+    ],
+    [
+      1.4,
+      1.7
+    ],
+    [
+      1.6,
+      1.2
+    ],
+    [
+      1.8,
+      1.1
+    ]
+  ],
+  "selected_cells": 2,
+  "total_mass": 17,
+  "construction": "Frozen Python source stats and canonical R08/R10 numerical implementation; no Java output used",
+  "implementation_sha256": {
+    "_distribution_math.py": "caab53852bfc831a46dc226834eced07f10c90cd12d7ac166140581cab11c865",
+    "bounded_sidecar.py": "3ba5f66d903543ca82bd364cfd866e9a5c24a3e11e21cf914790605e4133de1c",
+    "sidecar_workflow.py": "c63517eaa2b874cc6ba9eec6e733e7b9a2937b3bb1df1f17d24496f2bff19143",
+    "local_shape.py": "58f1dbecf4808fd7013687b1d73e99ec7bab910cb09da78b9b48e50dec171183",
+    "hierarchical_shape.py": "1b7d5e487792341fb5a8ba278cdab86dc22169043f8cab77040ed629e8918929"
+  },
+  "files": {
+    "src_0-moments.bin": {
+      "bytes": 84,
+      "sha256": "61a773844d59974460ccf45792aa770c88608b494b24060638795092e74d8860"
+    },
+    "src_0.hist": {
+      "bytes": 104,
+      "sha256": "02a9042d18331f925fe21a4c37631b0829d43de9febf8d8fd170fddc3ebdded7"
+    },
+    "children.bin": {
+      "bytes": 137,
+      "sha256": "026215d98a5f73a5d29aa2bbe08c1b0756358131988ff5a697b3a94a879890e9"
+    },
+    "golden.csv": {
+      "bytes": 581,
+      "sha256": "01f1fd3da2c7a36608ea155576e5337d4e4b8cc4fe193c6ab049c5f3b3db6cea"
+    }
+  }
+}

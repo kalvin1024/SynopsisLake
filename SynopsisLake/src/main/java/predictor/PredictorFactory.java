@@ -34,6 +34,10 @@ public final class PredictorFactory {
 			ErrorGate g = ((LearnedErrorPredictor) predictor).getGate();
 			fallback = g == null ? null : g.getCutoff();
 		}
+		if (fallback == null && predictor instanceof SourceAugmentedLearnedPredictor) {
+			ErrorGate g = ((SourceAugmentedLearnedPredictor) predictor).getGate();
+			fallback = g == null ? null : g.getCutoff();
+		}
 		if (cutoffsPath != null) {
 			return CutoffTable.load(cutoffsPath, eps, delta, fallback);
 		}
