@@ -29,6 +29,11 @@
 # MAGIC query is answered from one merged synopsis. `coverage_per_rate` is the share of test queries the gate answers from
 # MAGIC the synopsis. The pooled numbers (one cutoff over all rates, as in notebook 02) are kept for comparison.
 # MAGIC
+# MAGIC **Model files.** Variants named in the `export_models` widget (comma separated, default `v1`; empty for none) are
+# MAGIC also saved for the Java gate, trained on the first seed, to `<sample_root>/<dataset>/models/<variant>/`
+# MAGIC (`model.txt`, `model.properties`, `cutoffs.csv`, `gate_report.csv`, `importance.csv`) and logged to MLflow. Each
+# MAGIC variant must be in `variants`.
+# MAGIC
 # MAGIC **Runtime:** about 33 model fits (7 variants × 3 seeds, plus 2 tests × 2 settings × 3 seeds). Use the `seeds`,
 # MAGIC `variants` and `generalization` widgets to run less.
 # MAGIC
@@ -62,7 +67,8 @@ def _repo_root():
 def _defaults(volume):
     return {"volume": volume, "repo_root": _repo_root(), "data_root": volume + "/data/ml",
             "sample_root": volume + "/output/ml", "dataset": "authors_range", "seeds": "0,1,2",
-            "variants": "all", "generalization": "true", "experiment": "/Shared/synopsislake-error-predictor"}
+            "variants": "all", "generalization": "true", "export_models": "v1",
+            "experiment": "/Shared/synopsislake-error-predictor"}
 
 
 try:
@@ -84,6 +90,8 @@ def show(df):
 
 # COMMAND ----------
 
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import warnings  # noqa: E402
 
@@ -94,6 +102,7 @@ warnings.filterwarnings("ignore", message=".*eval_set.*")   # newer LightGBM ren
 sys.path.insert(0, os.path.join(get("repo_root"), "ml"))
 from features import FEATURES, check_estimates  # noqa: E402
 from features_v1 import FEATURES_V1, GROUPS, build_table_v1, check_source_estimates  # noqa: E402
+from gate_artifacts import write_gate_artifacts  # noqa: E402
 from gate_eval import PARAMS, run  # noqa: E402
 
 try:
@@ -152,11 +161,18 @@ def log_run(name, seed, features, res):
         mlflow.log_metric("best_iteration", int(res.best_iteration.iloc[0]))
 
 
+EXPORT = [v for v in get("export_models").split(",") if v.strip()]
+missing = [v for v in EXPORT if v not in VARIANTS]
+if missing:
+    raise ValueError(f"export_models {missing} must be in the variants being run: {list(VARIANTS)}")
+models = {}                                                    # variant -> model trained on SEEDS[0]
 results, importances = [], []
 for name, feats in VARIANTS.items():
     for seed in SEEDS:
         t0 = time.time()
-        res, imp, _ = run(df, feats, seed)
+        res, imp, model = run(df, feats, seed)
+        if name in EXPORT and seed == SEEDS[0]:
+            models[name] = (model, imp)
         res.insert(0, "variant", name)
         res.insert(1, "n_features", len(feats))
         results.append(res)
@@ -166,6 +182,35 @@ for name, feats in VARIANTS.items():
 ablations = pd.concat(results, ignore_index=True)
 ablations.to_csv(f"{report_dir}/v1_ablations.csv", index=False)
 pd.concat(importances).to_csv(f"{report_dir}/v1_importance.csv", index=False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Model files for the Java gate
+# MAGIC
+# MAGIC Same files as notebook 02 writes for v0, calibrated on the same calibration queries (`gate_eval.split_ids` with
+# MAGIC the seed the model was trained on). Use them with `ApproxQueryExp -mode gated -modelPath …/model.txt -cutoffs …/cutoffs.csv`.
+
+# COMMAND ----------
+
+for name, (model, imp) in models.items():
+    out = f"{run_dir}/models/{name}"
+    os.makedirs(out, exist_ok=True)
+    # LightGBM's save_model reopens the file in append mode, which Unity Catalog volumes do not support:
+    # write to local disk first (as notebook 02 does), then copy the files to the volume.
+    with tempfile.TemporaryDirectory() as tmp:
+        model.booster_.save_model(f"{tmp}/model.txt")
+        imp.to_csv(f"{tmp}/importance.csv", index=False)
+        rep = write_gate_artifacts(model, VARIANTS[name], df, tmp, SEEDS[0])
+        for f in os.listdir(tmp):
+            shutil.copyfile(f"{tmp}/{f}", f"{out}/{f}")
+        if mlflow is not None:
+            with mlflow.start_run(run_name=f"v1-{dataset}-{name}-model-seed{SEEDS[0]}"):
+                mlflow.log_params({"dataset": dataset, "variant": name, "seed": SEEDS[0],
+                                   "features": ",".join(VARIANTS[name])})
+                mlflow.log_artifacts(tmp)
+    print(f"{name}: wrote {out} ({len(VARIANTS[name])} inputs, seed {SEEDS[0]})")
+    show(rep[rep.eps.isin([0.1, 0.25])].groupby("eps")[["coverage", "violation"]].mean().round(3).reset_index())
 
 # COMMAND ----------
 
@@ -192,7 +237,7 @@ eps = 0.25
 s = summary.reset_index()
 s = s[s.eps == eps].set_index("variant").reindex(list(VARIANTS))
 fig, ax = plt.subplots(figsize=(8, 4))
-ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std, color="#4C78A8")
+ax.bar(s.index, s.coverage_per_rate_mean, yerr=s.coverage_per_rate_std.fillna(0), color="#4C78A8")   # std is NaN with a single seed
 ax.axhline(base.loc[(eps, "oracle"), "coverage_per_rate"], ls="--", color="grey", label="oracle (true error)")
 ax.axhline(base.loc[(eps, "skew_align"), "coverage_per_rate"], ls=":", color="black", label="Skewness-Align")
 ax.set_ylabel("share answered from synopsis")

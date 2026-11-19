@@ -2,7 +2,7 @@ name: Build JAR, upload to DBFS and trigger Databricks run
 
 on:
   push:
-    branches: [ "pyspark-migration", "main", "experiments-kalvin" ]
+    branches: [ "pyspark-migration", "main", "experiments-kalvin", "ml-job-v1-models" ]
     # Only build and run the Databricks jobs when the JAR source, the bundle, the ML code, their input
     # data, or this workflow changes. Edits elsewhere (e.g. experiments/ notebooks) skip CI.
     paths:
