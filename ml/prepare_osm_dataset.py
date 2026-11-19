@@ -1,6 +1,8 @@
 """Build a second dataset from the 1M-point OSM sample, the way the authors' range data was made.
 
     python ml/prepare_osm_dataset.py SynopsisLake/osm21_pois_shuffle_sample.csv data/osm_global data/ml/osm_global
+    python ml/prepare_osm_dataset.py australia_oceania_pois.csv data/oceania data/ml/oceania \
+        --lon-cut 145 --lat-cut -30 --bbox 110 180 -60 25        # a regional extract (ml/extract_osm_pois.py)
 
 The authors' data is four spatial tiles of one point set (files 0..3, tab separated lon, lat, timestamp; neighbouring
 tiles overlap a little) and about 32,000 data-driven queries: centred on a random data point, one of four sizes that
@@ -11,9 +13,12 @@ are the extent divided by 84, 72, 60 and 48 per axis (12,696 / 10,243 / 5,722 / 
     <dataset_dir>/queries-Ans.txt    minLon,maxLon,minLat,maxLat,exactCount (ml/SCHEMA.md); line number = qId
     <dataset_dir>/queries-meta.csv   qId,scale,width,height
 
-Tiles: longitude cut at LON_CUT, latitude at LAT_CUT, each tile reaching OVERLAP degrees past the cut.
+Tiles: longitude cut at --lon-cut (default 10), latitude at --lat-cut (default 30), each tile reaching OVERLAP degrees
+past the cut. --bbox minLon maxLon minLat maxLat first drops points outside it (for a region that wraps the
+antimeridian, whose extent would otherwise be the whole globe and make every query huge).
 Run the logger with `-dataDir <points_dir> -numFile 4 -srcRes 120,168,96,144 -queryFile <dataset_dir>/queries-Ans.txt`.
 """
+import argparse
 import os
 import sys
 
@@ -29,11 +34,11 @@ COUNTS = (12696, 10243, 5722, 3370)               # queries per size in the auth
 SEED = 0
 
 
-def tiles(pts):
+def tiles(pts, lon_cut=LON_CUT, lat_cut=LAT_CUT):
     """Four overlapping tiles (SW, NW, SE, NE as in the authors' files: west first, then east)."""
     lon, lat = pts[:, 0], pts[:, 1]
-    west, east = lon <= LON_CUT + OVERLAP / 2, lon >= LON_CUT - OVERLAP / 2
-    south, north = lat <= LAT_CUT + OVERLAP / 2, lat >= LAT_CUT - OVERLAP / 2
+    west, east = lon <= lon_cut + OVERLAP / 2, lon >= lon_cut - OVERLAP / 2
+    south, north = lat <= lat_cut + OVERLAP / 2, lat >= lat_cut - OVERLAP / 2
     return [west & south, west & north, east & south, east & north]
 
 
@@ -52,11 +57,16 @@ def queries(pts, rng):
     return pd.DataFrame(rows).sample(frac=1, random_state=SEED).reset_index(drop=True)
 
 
-def main(src, points_dir, dataset_dir):
+def main(src, points_dir, dataset_dir, lon_cut=LON_CUT, lat_cut=LAT_CUT, bbox=None):
     pts = pd.read_csv(src, sep="\t", header=None).to_numpy()
+    if bbox:
+        x0, x1, y0, y1 = bbox
+        keep = (pts[:, 0] >= x0) & (pts[:, 0] <= x1) & (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
+        print(f"bbox {bbox}: kept {int(keep.sum()):,} of {len(pts):,} points")
+        pts = pts[keep]
     os.makedirs(points_dir, exist_ok=True)
     os.makedirs(dataset_dir, exist_ok=True)
-    masks = tiles(pts)
+    masks = tiles(pts, lon_cut, lat_cut)
     for i, m in enumerate(masks):
         pd.DataFrame(pts[m]).to_csv(os.path.join(points_dir, f"{i}.csv"), sep="\t", header=False, index=False,
                                     float_format="%.7f", lineterminator="\n")
@@ -73,6 +83,12 @@ def main(src, points_dir, dataset_dir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        sys.exit(__doc__)
-    main(*sys.argv[1:])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("src")
+    ap.add_argument("points_dir")
+    ap.add_argument("dataset_dir")
+    ap.add_argument("--lon-cut", type=float, default=LON_CUT)
+    ap.add_argument("--lat-cut", type=float, default=LAT_CUT)
+    ap.add_argument("--bbox", type=float, nargs=4, metavar=("MINLON", "MAXLON", "MINLAT", "MAXLAT"))
+    a = ap.parse_args()
+    main(a.src, a.points_dir, a.dataset_dir, a.lon_cut, a.lat_cut, a.bbox)
