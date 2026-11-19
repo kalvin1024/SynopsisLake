@@ -56,7 +56,7 @@ def _repo_root():
 
 def _defaults(volume):
     return {"volume": volume, "repo_root": _repo_root(), "data_root": volume + "/data/ml",
-            "sample_root": volume + "/output/ml", "dataset": "authors_range", "variant": "v1_no_skew",
+            "sample_root": volume + "/output/ml", "dataset": "authors_range", "variants": "v0,v1,v1_no_skew",
             "seeds": "0,1,2,3,4,5,6,7,8,9", "eps_list": "0.1,0.25", "delta": "0.05", "conf": "0.9",
             "slack": "0.01"}
 
@@ -95,10 +95,10 @@ from gate_eval import cutoff, fit  # noqa: E402
 
 VARIANTS = {"v0": FEATURES, "v0_no_skew": [f for f in FEATURES if f not in GROUPS["skew"]],
             "v1": FEATURES_V1, "v1_no_skew": [f for f in FEATURES_V1 if f not in GROUPS["skew"]]}
-variant = get("variant")
-if variant not in VARIANTS:
-    raise ValueError(f"variant must be one of {list(VARIANTS)}, got {variant!r}")
-feats = VARIANTS[variant]
+variants = [v.strip() for v in get("variants").split(",") if v.strip()]
+bad_names = [v for v in variants if v not in VARIANTS]
+if bad_names:
+    raise ValueError(f"variants must come from {list(VARIANTS)}, got {bad_names}")
 
 dataset = get("dataset")
 run_dir, data_dir = f"{get('sample_root')}/{dataset}", f"{get('data_root')}/{dataset}"
@@ -110,8 +110,8 @@ DELTA, CONF, SLACK = float(get("delta")), float(get("conf")), float(get("slack")
 
 df = build_table_v1(run_dir, data_dir)
 rates = np.sort(df.mergeRate.unique())
-print(f"{len(df):,} rows, {df.qId.nunique():,} queries, {len(rates)} merge rates | variant {variant} "
-      f"({len(feats)} inputs), seeds {SEEDS}, delta {DELTA}, ucb level {CONF}")
+print(f"{len(df):,} rows, {df.qId.nunique():,} queries, {len(rates)} merge rates | variants "
+      + ", ".join(f"{v} ({len(VARIANTS[v])} inputs)" for v in variants) + f", seeds {SEEDS}, delta {DELTA}, ucb level {CONF}")
 
 # COMMAND ----------
 
@@ -141,27 +141,29 @@ RULES = [("empirical", "default", lambda s, e, eps: cutoff(s, e, eps, DELTA)),
          ("empirical_cal30", "cal30", lambda s, e, eps: cutoff(s, e, eps, DELTA))]
 
 cells = []
+relerr = df.relErr.to_numpy()
 for seed in SEEDS:
     sp = splits(df.qId, seed)
     tr = df[df.qId.isin(sp["default"][0])]
-    model = fit(tr, feats, seed)
-    score = model.predict(df[feats])
-    for rule, which, make_cutoff in RULES:
-        _, ca_ids, te_ids = sp[which]
-        ca, te = df.qId.isin(ca_ids).to_numpy(), df.qId.isin(te_ids).to_numpy()
-        for m in rates:
-            at = (df.mergeRate == m).to_numpy()
-            c, t = ca & at, te & at
-            for eps in EPS_LIST:
-                cut = make_cutoff(score[c], df.relErr.to_numpy()[c], eps)
-                cal_ans = score[c] <= cut
-                test_ans = score[t] <= cut
-                cells.append({"seed": seed, "rule": rule, "mergeRate": m, "eps": eps, "cutoff": cut,
-                              "cal_answered": int(cal_ans.sum()),
-                              "cal_bad": int((df.relErr.to_numpy()[c][cal_ans] > eps).sum()),
-                              "test_queries": int(t.sum()), "test_answered": int(test_ans.sum()),
-                              "test_bad": int((df.relErr.to_numpy()[t][test_ans] > eps).sum())})
-    print(f"seed {seed}: best iteration {model.best_iteration_}")
+    for variant in variants:
+        feats = VARIANTS[variant]
+        model = fit(tr, feats, seed)
+        score = model.predict(df[feats])
+        for rule, which, make_cutoff in RULES:
+            _, ca_ids, te_ids = sp[which]
+            ca, te = df.qId.isin(ca_ids).to_numpy(), df.qId.isin(te_ids).to_numpy()
+            for m in rates:
+                at = (df.mergeRate == m).to_numpy()
+                c, t = ca & at, te & at
+                for eps in EPS_LIST:
+                    cut = make_cutoff(score[c], relerr[c], eps)
+                    cal_ans, test_ans = score[c] <= cut, score[t] <= cut
+                    cells.append({"seed": seed, "variant": variant, "rule": rule, "mergeRate": m, "eps": eps,
+                                  "cutoff": cut, "cal_answered": int(cal_ans.sum()),
+                                  "cal_bad": int((relerr[c][cal_ans] > eps).sum()),
+                                  "test_queries": int(t.sum()), "test_answered": int(test_ans.sum()),
+                                  "test_bad": int((relerr[t][test_ans] > eps).sum())})
+        print(f"seed {seed} {variant}: best iteration {model.best_iteration_}")
 cells = pd.DataFrame(cells)
 cells.to_csv(f"{report_dir}/gate_calibration_cells.csv", index=False)
 
@@ -185,38 +187,46 @@ def pooled(g):
                       if per_cell.notna().any() else np.nan})
 
 
-summary = pd.DataFrame([{"eps": k[0], "rule": k[1], "mergeRate": k[2], **pooled(g).to_dict()}
-                        for k, g in cells.groupby(["eps", "rule", "mergeRate"])])
+summary = pd.DataFrame([{"variant": k[0], "eps": k[1], "rule": k[2], "mergeRate": k[3], **pooled(g).to_dict()}
+                        for k, g in cells.groupby(["variant", "eps", "rule", "mergeRate"])])
 summary["flag"] = np.where(summary.ci_low > DELTA, "HIGH", "")
 summary.to_csv(f"{report_dir}/gate_calibration_summary.csv", index=False)
 
 for eps in EPS_LIST:
-    s = summary[summary.eps == eps]
-    print(f"\neps = {eps}   (delta = {DELTA}, slack {SLACK}; cells_over = share of (seed, merge rate) cells above delta + slack)")
-    view = s.pivot(index="mergeRate", columns="rule", values="violation").round(3)
-    view = view.join(s.pivot(index="mergeRate", columns="rule", values="coverage").round(3).add_prefix("cov_"))
-    view = view.join(s.pivot(index="mergeRate", columns="rule", values="flag").add_prefix("flag_"))
-    show(view.sort_index(ascending=False).reset_index())
-    avg = s.groupby("rule")[["violation", "coverage", "cells_over"]].mean().round(3)
-    print("mean over merge rates:")
-    show(avg.reset_index())
-    print("merge rates flagged HIGH:", s[s.flag == "HIGH"].groupby("rule").size().to_dict() or "none")
+    for variant in variants:
+        s = summary[(summary.eps == eps) & (summary.variant == variant)]
+        print(f"\n=== {variant}, eps = {eps}   (delta = {DELTA}, slack {SLACK}; cells_over = share of (seed, merge rate) "
+              f"cells above delta + slack)")
+        view = s.pivot(index="mergeRate", columns="rule", values="violation").round(3)
+        view = view.join(s.pivot(index="mergeRate", columns="rule", values="coverage").round(3).add_prefix("cov_"))
+        view = view.join(s.pivot(index="mergeRate", columns="rule", values="flag").add_prefix("flag_"))
+        show(view.sort_index(ascending=False).reset_index())
+        print("merge rates flagged HIGH:", s[s.flag == "HIGH"].groupby("rule").size().to_dict() or "none")
+
+# one table to compare the models: mean over merge rates
+avg = summary.groupby(["eps", "variant", "rule"])[["violation", "coverage", "cells_over"]].mean().round(3)
+avg["rates_HIGH"] = summary[summary.flag == "HIGH"].groupby(["eps", "variant", "rule"]).size()
+avg["rates_HIGH"] = avg.rates_HIGH.fillna(0).astype(int)
+print("\nmean over merge rates, all models")
+show(avg.reset_index())
 
 # COMMAND ----------
 
-fig, ax = plt.subplots(len(EPS_LIST), 2, figsize=(13, 4 * len(EPS_LIST)), squeeze=False)
+fig, ax = plt.subplots(2 * len(EPS_LIST), len(variants), figsize=(5 * len(variants), 3.6 * 2 * len(EPS_LIST)),
+                       squeeze=False)
 colors = {"empirical": "#1f5fbf", "ucb": "#d1603d", "empirical_cal30": "#4a9b8e"}
 for i, eps in enumerate(EPS_LIST):
-    for rule, color in colors.items():
-        s = summary[(summary.eps == eps) & (summary.rule == rule)].sort_values("mergeRate")
-        ax[i, 0].plot(s.mergeRate, s.violation, color=color, marker="o", ms=3, label=rule)
-        ax[i, 0].fill_between(s.mergeRate, s.ci_low, s.ci_high, color=color, alpha=0.15)
-        ax[i, 1].plot(s.mergeRate, s.coverage, color=color, marker="o", ms=3, label=rule)
-    ax[i, 0].axhline(DELTA, color="red", lw=0.8, ls="--")
-    ax[i, 0].set_title(f"eps {eps}: test violation (95% interval)")
-    ax[i, 1].set_title(f"eps {eps}: coverage")
-    for a in ax[i]:
-        a.set_xlabel("merge rate")
+    for j, variant in enumerate(variants):
+        for rule, color in colors.items():
+            s = summary[(summary.eps == eps) & (summary.variant == variant) & (summary.rule == rule)]
+            s = s.sort_values("mergeRate")
+            ax[2 * i, j].plot(s.mergeRate, s.violation, color=color, marker="o", ms=3, label=rule)
+            ax[2 * i, j].fill_between(s.mergeRate, s.ci_low, s.ci_high, color=color, alpha=0.15)
+            ax[2 * i + 1, j].plot(s.mergeRate, s.coverage, color=color, marker="o", ms=3, label=rule)
+        ax[2 * i, j].axhline(DELTA, color="red", lw=0.8, ls="--")
+        ax[2 * i, j].set_title(f"{variant}, eps {eps}: test violation (95% interval)")
+        ax[2 * i + 1, j].set_title(f"{variant}, eps {eps}: coverage")
+        ax[2 * i + 1, j].set_xlabel("merge rate")
 ax[0, 0].legend()
 plt.tight_layout()
 fig.savefig(f"{report_dir}/gate_calibration.png", dpi=150)
