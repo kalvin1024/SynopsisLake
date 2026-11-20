@@ -350,3 +350,53 @@ Python regression checks from the repository root:
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+### Compare source shape with the saved models in notebook 09b
+
+`notebooks/09b_compare_models_end_to_end.py` now includes notebook 22's standalone `source_shape` assessor beside
+SA, exact, and the models in `models`. Every arm uses the same original ARM H, held-out query IDs, calibration
+IDs, raw data, Java entry point and batch timer. It does not retrain the models, generate queries or replace H.
+Live Java scores recalibrate all cutoffs on the common calibration set; existing model files are unchanged.
+
+For the team's Europe comparison, use the **actual Europe dataset identifier and paths** from that model export:
+set `dataset`, `dataset_dir`, `run_dir`, `data_dir`, and `models_root`; choose `models=v1,v1_no_skew`,
+`seed=0`, `model_training_seed=0`, `eps=0.25`, `delta=0.05`, `merge_rates=1,0.8,0.6,0.4,0.2`,
+`n_queries=2000`, `repeats=3`, and `shape_enabled=true`. Non-AUTHORS datasets require an explicit raw `data_dir`.
+Use the seed that actually trained the models. Optional `model_manifest` supplies dataset/seed/model-SHA
+provenance; legacy exports without it remain explicitly marked as unverified training-split provenance.
+
+Leave `shape_dir` blank to build the fixed source-only metadata from that run's source exports and numbered raw
+CSVs, with `shape_packet_budget=49152`; existing AUTHORS shape artifacts cannot be reused for Europe. A supplied
+shape directory is identity-checked. Use a current jar containing `SourceShapePredictor`; `jar_path` or a complete
+`classpath` can override the shared Volume jar without deploying anything. Existing Databricks widget values
+persist across pulls, so check the settings when changing datasets.
+
+Each execution creates a unique `09b-...` directory under `output_root` (default `<run_dir>/compare`) and exports
+`09b_comparison_results.zip`. Share that ZIP for review. It includes `summary.csv`, `per_query.csv`, `timing.csv`,
+`setup_times.csv`, `calibration.csv`, `frozen_cutoffs.csv`, `payload_costs.csv`, `parity.csv`, and `manifest.json`.
+Batch wall time includes JVM startup/loading, query execution, CSV output and Parquet conversion; construction
+and calibration are separate. Request-compute mean/p95 from logged phases have a narrower scope. Always report
+accepted counts, bad counts and violation with any speedup; empirical calibration is not a future 5% guarantee.
+
+The common Java calibration intentionally replaces the old Python-derived cutoff values **for this comparison
+only**, so results need not reproduce the earlier PR table exactly. The saved weights and original cutoff files
+are preserved. Query eligibility and the query-ID split match 09b; this does not turn a query split into an
+unseen-location test. A small TRAIN-only exact audit fails a mismatched raw/query input before timed batches.
+
+For a local replay, put the same widget settings in a JSON file and run:
+
+```bash
+python -m ml.compare_shape_e2e --config /path/to/comparison-settings.json
+```
+
+The optional training `model_manifest` must come from the training run, not be invented from the test results.
+Its schema is `dataset`, integer `seed`, `split_kind="query"`, `eligible_query_ids_sha256` (SHA256 of JSON-encoded
+sorted eligible IDs with separators `(',', ':')`), and `models: {name: {model_sha256: ...}}`. It declares and
+checks the matching training cohort and weights; it does not replay or prove the training procedure.
+
+Focused correctness checks (the real Java tests require a JDK and commons-math3):
+
+```bash
+COMMONS_MATH3_JAR=/path/to/commons-math3.jar python -m unittest discover -s tests -p 'test_compare_shape_e2e.py' -v
+python -m unittest discover -s tests -p 'test_shape_e2e_inputs.py' -v
+```
