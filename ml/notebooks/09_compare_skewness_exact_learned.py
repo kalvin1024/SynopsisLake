@@ -1,4 +1,12 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# dependencies = [
+#   "lightgbm",
+#   "pyarrow",
+# ]
+# ///
 # MAGIC %md
 # MAGIC # 09 · Skewness-Align vs exact execution vs the learned error predictor
 # MAGIC

@@ -1,4 +1,12 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# dependencies = [
+#   "lightgbm",
+#   "pyarrow",
+# ]
+# ///
 # MAGIC %md
 # MAGIC # 09b · Skewness-Align vs exact execution vs every learned error predictor (v0, v1, v1_no_skew)
 # MAGIC
@@ -52,17 +60,17 @@ def _repo_root():
 DEFAULTS = {
     "volume": VOL,
     "repo_root": _repo_root(),
-    "dataset": "authors_range",
+    "dataset": "europe_range",
     "run_dir": "",              # default <volume>/output/ml/<dataset>
     "models": "v0,v1,v1_no_skew",   # learned models to run; each is a folder <models_root>/<name> with model.txt, model.properties, cutoffs.csv
-    "models_root": "",          # default <run_dir>/models
-    "data_dir": "",             # default <volume>/data/range_query (0.csv, 1.csv, ... tab-separated lon lat)
+    "models_root": "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/ml_artifacts",          # default <run_dir>/models
+    "data_dir": "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake/data/europe_range",             # default <volume>/data/range_query (0.csv, 1.csv, ... tab-separated lon lat)
     "seed": "0",
     "eps": "0.10",              # an answer is "good" if its relative error is at most eps
     "delta": "0.05",            # at most this share of synopsis answers may be above eps
-    "merge_rates": "0.75,0.5,0.25,0.1",   # the nearest available merge rate is used for each
+    "merge_rates": "1,0.8,0.6,0.4,0.2",   # the nearest available merge rate is used for each
     "n_queries": "2000",        # held-out queries to answer (a random sample, same for every setup); "all" for every one
-    "repeats": "3",             # timing repeats per setup and merge rate
+    "repeats": "2",             # timing repeats per setup and merge rate
     "java": "java",
 }
 try:
