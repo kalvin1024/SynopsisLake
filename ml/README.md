@@ -364,6 +364,11 @@ set `dataset`, `dataset_dir`, `run_dir`, `data_dir`, and `models_root`; choose `
 `n_queries=2000`, `repeats=3`, and `shape_enabled=true`. Non-AUTHORS datasets require an explicit raw `data_dir`.
 Use the seed that actually trained the models. Optional `model_manifest` supplies dataset/seed/model-SHA
 provenance; legacy exports without it remain explicitly marked as unverified training-split provenance.
+The notebook now requires an explicit dataset and defaults to `models=v1,v1_no_skew`, `eps=0.25` and the Europe
+rate grid. A shallow read-only inventory prints available run/model candidates. Pulling does not reset old
+Databricks widgets: manually replace `authors_range` or a model list containing `v0` when using Europe.
+Missing files first require checking the selected dataset and model directory; do not synthesize
+`model.properties` or retrain notebook 06 when the correct exports already exist elsewhere.
 
 Leave `shape_dir` blank to build the fixed source-only metadata from that run's source exports and numbered raw
 CSVs, with `shape_packet_budget=49152`; existing AUTHORS shape artifacts cannot be reused for Europe. A supplied

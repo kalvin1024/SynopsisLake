@@ -84,6 +84,21 @@ def _fixture(root):
 
 
 class ComparisonMathTests(unittest.TestCase):
+    def test_missing_dataset_cannot_silently_select_authors(self):
+        with self.assertRaisesRegex(ValueError, "dataset explicitly"):
+            comparison._config({})
+
+    def test_missing_properties_requires_matching_export_without_creating_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "models" / "v1"
+            folder.mkdir(parents=True)
+            (folder / "model.txt").write_text(_constant_model())
+            config = dict(dataset="europe", run_dir=str(root), models_root=str(root / "models"), models=["v1"])
+            with self.assertRaisesRegex(FileNotFoundError, "Check these settings.*placeholder"):
+                comparison._model_dirs(config)
+            self.assertFalse((folder / "model.properties").exists())
+
     def test_zero_truth_policy_keeps_positive_estimate_infinite(self):
         value = comparison.relative_error(np.array([0., 1., 12.]), np.array([0., 0., 10.]))
         np.testing.assert_equal(value[:2], np.array([0., np.inf]))

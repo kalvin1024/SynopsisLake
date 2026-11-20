@@ -39,7 +39,7 @@
 # MAGIC %md
 # MAGIC ## Settings for the common Europe comparison
 # MAGIC
-# MAGIC The old AUTHORS defaults remain available. For the Europe experiment, set the following before continuing:
+# MAGIC Select the actual dataset explicitly; no AUTHORS dataset is silently substituted. For Europe, set:
 # MAGIC
 # MAGIC | Widget | Value |
 # MAGIC |---|---|
@@ -83,18 +83,18 @@ def _repo_root():
 DEFAULTS = {
     "volume": VOL,
     "repo_root": _repo_root(),
-    "dataset": "authors_range",
+    "dataset": "",                  # required: exact identifier used for the saved Europe model export
     "dataset_dir": "",              # default <volume>/data/ml/<dataset>
     "run_dir": "",                  # default <volume>/output/ml/<dataset>
-    "models": "v0,v1,v1_no_skew",
+    "models": "v1,v1_no_skew",
     "models_root": "",              # default <run_dir>/models; v0 may use <run_dir>/gate
     "data_dir": "",                 # AUTHORS default only; explicitly set for Europe
     "seed": "0",
     "model_training_seed": "0",      # must match seed and the saved models' actual training split
     "model_manifest": "",           # optional dataset/seed/model-SHA provenance JSON
-    "eps": "0.10",                  # Europe comparison: set to 0.25
+    "eps": "0.25",
     "delta": "0.05",
-    "merge_rates": "0.75,0.5,0.25,0.1",
+    "merge_rates": "1,0.8,0.6,0.4,0.2",
     "n_queries": "2000",            # "all" uses all eligible test IDs
     "repeats": "3",
     "java": "java",
@@ -137,6 +137,30 @@ print("Split seed:", config["seed"], "| declared model training seed:", config["
 print("Error limit:", config["eps"], "| accepted-risk target:", config["delta"])
 print("Queries:", config["n_queries"], "| timing repeats:", config["repeats"])
 print("Every method will use the same selected test IDs, original H and common Java calibration.")
+
+# Read-only, shallow inventory: names are candidates, not evidence of matching data or model provenance.
+print("\nAvailable run/model candidates (no dataset is selected automatically):")
+candidate_root = Path(config["volume"]) / "output" / "ml"
+try:
+    candidates = sorted(p for p in candidate_root.iterdir() if p.is_dir())[:30]
+    if config["run_dir"]:
+        explicit = Path(config["run_dir"]).expanduser()
+        if explicit not in candidates:
+            candidates.insert(0, explicit)
+    for candidate in candidates:
+        models = (Path(config["models_root"]).expanduser()
+                  if config["models_root"] and str(candidate) == config["run_dir"] else candidate / "models")
+        print("Run candidate:", candidate, "| rows.csv:", (candidate / "rows.csv").is_file())
+        for name in ("v1", "v1_no_skew"):
+            folder = models / name
+            print(" ", folder, "| model.txt:", (folder / "model.txt").is_file(),
+                  "| model.properties:", (folder / "model.properties").is_file())
+    if not candidates:
+        print("No run folders found under", candidate_root, "; use the actual Europe run_dir/models_root.")
+except OSError as error:
+    print("Could not list", candidate_root, ":", error)
+if not config["dataset"]:
+    raise ValueError("Set dataset, run_dir, dataset_dir, data_dir and models_root to the existing Europe export, then rerun this cell.")
 
 # COMMAND ----------
 

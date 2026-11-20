@@ -131,22 +131,24 @@ def summarize_answers(frame, H, truth, eps):
 def _config(config):
     c = dict(config)
     c.setdefault("volume", "/Volumes/cs598_ccc_research_7474657373242960/synopsis_lake")
-    c.setdefault("dataset", "authors_range")
+    c["dataset"] = str(c.get("dataset", "")).strip()
+    if not c["dataset"]:
+        raise ValueError("Set dataset explicitly to the saved models' dataset identifier; Europe is not AUTHORS")
     for key, default in (("seed", 0), ("model_training_seed", 0), ("repeats", 3),
                          ("shape_packet_budget", 49152), ("chunk_size", 250000)):
         c[key] = int(c.get(key, default))
-    c["eps"], c["delta"] = float(c.get("eps", .10)), float(c.get("delta", .05))
+    c["eps"], c["delta"] = float(c.get("eps", .25)), float(c.get("delta", .05))
     if not (0 < c["eps"] and 0 <= c["delta"] < 1) or c["repeats"] < 1:
         raise ValueError("Need eps>0, 0<=delta<1, and repeats>=1")
     if c["seed"] != c["model_training_seed"]:
         raise ValueError("seed must match model_training_seed; no new test split for old weights")
     c["shape_enabled"] = _bool(c.get("shape_enabled", True))
-    models = c.get("models", "v0,v1,v1_no_skew")
+    models = c.get("models", "v1,v1_no_skew")
     c["models"] = [x.strip() for x in models.split(",") if x.strip()] if isinstance(models, str) else list(models)
     if (not c["models"] or len(set(c["models"])) != len(c["models"])
             or any(not re.fullmatch(r"[A-Za-z0-9_-]+", x) or x in ("source_shape", "skewness", "exact") for x in c["models"])):
         raise ValueError("models must contain unique, safe saved-model directory names")
-    rates = c.get("merge_rates", "0.75,0.5,0.25,0.1")
+    rates = c.get("merge_rates", "1,0.8,0.6,0.4,0.2")
     c["merge_rates"] = [float(x) for x in rates.split(",") if x.strip()] if isinstance(rates, str) else list(rates)
     if not c["merge_rates"] or not np.isfinite(c["merge_rates"]).all():
         raise ValueError("merge_rates must be nonempty and finite")
@@ -209,7 +211,13 @@ def _model_dirs(c):
             p = Path(c["run_dir"])/"gate"
         for f in ("model.txt", "model.properties"):
             if not (p/f).is_file():
-                raise FileNotFoundError(str(p/f) + "; export the matching dataset/seed model with notebook 06")
+                raise FileNotFoundError(
+                    f"Missing {p/f} for selected model '{name}'. "
+                    f"Resolved dataset={c['dataset']}, run_dir={c['run_dir']}, models_root={c['models_root']}. "
+                    "Check these settings and use the original matching model export; do not create placeholder properties. "
+                    "The Europe comparison needs models=v1,v1_no_skew; remove v0 unless its export is required and complete. "
+                    "Databricks retains old widget values after a pull. Training is needed only if the intended model export does not exist."
+                )
         out[name] = p
     return out
 
