@@ -260,7 +260,7 @@ rejected at load, with the name; add features with `FeatureRegistry.register` (i
 cd SynopsisLake && mvn test
 ```
 
-## 8. Budgeted source-shape assessment (R10)
+## 8. Budgeted source-shape assessment (notebook 22)
 
 `notebooks/22_source_shape_assessment.ipynb` is a focused source-information study. It keeps the original ARM answer
 and compares the full 28-feature learner with the same learner plus two R10-reference inputs, or the same two inputs
@@ -273,6 +273,12 @@ The filename follows the team sequence after notebook 12. Earlier research label
 13–21 on the historical `experiments/bounded-sidecar-e2e` branch; the latest source-shape notebook is 22 on
 `experiments/source-shape-integration`. Scientific method IDs and saved result names retain their original labels
 so existing frozen artifacts and provenance remain valid.
+
+New public outputs default to `synopsislake-results/22_source_shape_assessment`, with `22-review-...` review
+folders and `22_source_shape_results.zip`. The bundle's `manifest.json` and `README.txt` map legacy method IDs,
+including `R10` and `native_R08`, to readable names. Existing results and hash-locked run paths stay in place.
+Databricks retains widget values after a pull: clear `output_root` or set it to the new default to use the new root;
+an explicit path, including a previous `R10` path, is preserved.
 
 The live Python adapter reconstructs histogram estimates. The team's original v1 table instead takes some
 merge-shift inputs from Java-logged `est`/`srcSumEst`. Tiny arithmetic differences can change learned tree paths.
