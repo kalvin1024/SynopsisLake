@@ -1,14 +1,22 @@
-# Unseen-region comparison with a common total storage budget
+# Unseen-region comparisons with matched storage budgets
 
 Entry points:
 
-- Databricks: `ml/notebooks/23_region_budget_comparison.py`.
+- Databricks common-ceiling experiment: `ml/notebooks/23_region_budget_comparison.py`.
+- Databricks Source Shape budget experiment: `ml/notebooks/24_ss_matched_region_budget.py`.
 - CLI: `python -m ml.region_budget_comparison --config CONFIG.json`.
 
-This adds one focused experiment using notebook 22's source-shape representation, the team's full-v1 learner,
+Notebook 23 uses notebook 22's source-shape representation, the team's full-v1 learner,
 and 09b's Java execution/fallback components. Notebooks 22 and 09b retain their existing behavior. The new
 entry point is necessary because the earlier region test calibrates on the tested side and the earlier 22
 reference comparison does not match trained-model total storage.
+
+Notebook 24 takes a completed notebook 23 ZIP as its protocol reference. It matches the original merged
+histogram, Source Shape payload, region boundaries and western calibration IDs. The follow-up selects a
+disjoint eastern query set and compares the three synopsis methods at each dataset's actual Source Shape
+storage size. Set `prior_results_zip` to the archive path and `dataset` to `authors_range`, `europe_range`
+or `both`. Its separate output directory contains the per-seed `paper_table.csv`, `paper_table.md` and
+the result commentary in `matched_analysis_en.md`.
 
 ## What is compared
 

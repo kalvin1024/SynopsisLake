@@ -31,25 +31,27 @@ def _fixed_h_summary(rows, delta_pct):
     ref_met = paired.risk_target_status_ref.eq("met")
     both_met = ss_met & ref_met
     result = (
-        f"保留原本的 H 時，SS 有 {ss_met.sum()}/{len(paired)} 個 seeds 達到 {delta_pct}% 錯放目標，"
-        f"細格參考有 {ref_met.sum()}/{len(paired)} 個。"
+        f"With H fixed, Source Shape met the {delta_pct}% violation target in "
+        f"{ss_met.sum()}/{len(paired)} seeds and fine-grid reference in "
+        f"{ref_met.sum()}/{len(paired)}. "
     )
     if both_met.any():
         counts = paired.loc[both_met]
         diff = counts.accepted_count_ss - counts.accepted_count_ref
         if diff.gt(0).all():
-            result += f"在兩者都達標的 {len(diff)} 個 seeds 中，SS 每次都放行更多。"
+            result += f"Source Shape accepted more queries in all {len(diff)} seeds where both met the target."
         elif diff.lt(0).all():
-            result += f"在兩者都達標的 {len(diff)} 個 seeds 中，細格參考每次都放行更多。"
+            result += f"Fine-grid reference accepted more queries in all {len(diff)} seeds where both met the target."
         elif diff.eq(0).all():
-            result += f"在兩者都達標的 {len(diff)} 個 seeds 中，放行筆數相同。"
+            result += f"Acceptance counts were equal in all {len(diff)} seeds where both met the target."
         else:
             result += (
-                f"在兩者都達標的 {len(diff)} 個 seeds 中，SS 放行較多 {diff.gt(0).sum()} 次、"
-                f"細格參考較多 {diff.lt(0).sum()} 次、打平 {diff.eq(0).sum()} 次。"
+                f"Among the {len(diff)} seeds where both met the target, Source Shape accepted more in "
+                f"{diff.gt(0).sum()}, fine-grid reference accepted more in {diff.lt(0).sum()}, "
+                f"and {diff.eq(0).sum()} were tied."
             )
     else:
-        result += "沒有任何 seed 讓兩者同時達標。"
+        result += "No seed had both methods meet the target."
     return result
 
 
@@ -62,20 +64,21 @@ def _comparison_paragraph(table, delta_pct):
             raise ValueError("The matched-budget report requires a fine-grid direct answer")
         direct_met = direct.risk_target_status.eq("met").sum()
         saved = direct.seconds_saved_vs_exact.mean()
-        timing = f"平均省 {saved:.2f} 秒" if saved >= 0 else f"平均多花 {-saved:.2f} 秒"
+        timing = f"saved {saved:.2f} s per batch" if saved >= 0 else f"took {-saved:.2f} s longer per batch"
         risk = direct.violation.dropna()
         if risk.empty:
-            risk_text = "錯放率未定義"
+            risk_text = "violation rate was undefined"
         else:
-            risk_text = f"有放行的 seeds 平均錯放率 {risk.mean():.2%}"
+            risk_text = f"violation averaged {risk.mean():.2%} across seeds with accepted answers"
         results.append(
-            f"**{DATASET_LABELS.get(dataset, dataset)}**（{exact.total_budget_bytes:,} bytes 上限）"
+            f"**{DATASET_LABELS.get(dataset, dataset)}** ({exact.total_budget_bytes:,} byte cap). "
             + _fixed_h_summary(rows, delta_pct)
-            + f"改用細格直接回答時，平均放行率為 {direct.coverage.mean():.2%}，{risk_text}，"
-            f"有 {direct_met}/{len(direct)} 個 seeds 達標，每批平均 {direct.batch_median_s.mean():.2f} 秒，"
-            f"比全部精算的 {exact.batch_median_s:.2f} 秒{timing}。"
+            + f" Fine-grid direct answers covered {direct.coverage.mean():.2%} of queries on average. "
+            f"The {risk_text}. The method met the target in {direct_met}/{len(direct)} seeds "
+            f"and averaged {direct.batch_median_s.mean():.2f} s per batch. Compared with the "
+            f"{exact.batch_median_s:.2f} s always-exact baseline, it {timing}."
         )
-    return " ".join(results) + " 三個 seeds 共用同一批東側查詢，達標狀態分別以各 seed 的實測錯放率判定。"
+    return "\n\n".join(results) + "\n\nAll seeds reuse the same eastern test queries. Target status uses each seed's observed violation rate."
 
 
 def write_report(root, summary, delta):
@@ -127,4 +130,4 @@ def write_report(root, summary, delta):
         "The target status uses the unrounded observed rate.\n\n"
         + "\n".join(lines) + "\n", encoding="utf-8",
     )
-    (root / "analysis_zh.md").write_text(_comparison_paragraph(table, delta_pct) + "\n", encoding="utf-8")
+    (root / "matched_analysis_en.md").write_text(_comparison_paragraph(table, delta_pct) + "\n", encoding="utf-8")
