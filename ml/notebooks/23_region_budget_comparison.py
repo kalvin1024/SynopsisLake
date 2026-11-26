@@ -56,8 +56,8 @@
 # MAGIC A JDK with `java`/`javac` and commons-math3 are required. The runner compiles the new entry point and
 # MAGIC its dependencies directly from this checkout into a local temporary cache; no Maven build or replacement
 # MAGIC of the existing Volume JAR is needed. Alternatively, an explicit `classpath` must contain the new class
-# MAGIC and its dependencies. Restart Python after pulling changed helpers. Databricks
-# MAGIC keeps old widget values across pulls, so review every value before starting a different dataset.
+# MAGIC and its dependencies. Databricks keeps widget values across pulls. Leave `repo_root` blank to
+# MAGIC use this notebook's Git folder or enter the path to the checkout you want to use.
 
 # COMMAND ----------
 
@@ -76,7 +76,10 @@ def _repo_root():
         try:
             return str(Path(__file__).resolve().parents[2])
         except NameError:
-            return os.getcwd()
+            cwd = Path.cwd()
+            if cwd.name == "notebooks" and cwd.parent.name == "ml":
+                return str(cwd.parents[1])
+            return str(cwd)
 
 
 DEFAULTS = {
@@ -137,7 +140,7 @@ def _boolean(name):
 
 
 volume = str(get("volume")).strip().rstrip("/")
-repo_root = Path(str(get("repo_root")).strip()).expanduser().resolve()
+repo_root = Path(str(get("repo_root")).strip() or _repo_root()).expanduser().resolve()
 selection = str(get("dataset")).strip().lower()
 if selection not in ("authors_range", "europe_range", "both"):
     raise ValueError("dataset must be authors_range, europe_range or both")
@@ -198,14 +201,26 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/synopsislake-region-budget-matplotli
 
 helper_path = repo_root / "ml" / "region_budget_comparison.py"
 if not helper_path.is_file():
-    raise FileNotFoundError("Set repo_root to the updated checkout containing ml/region_budget_comparison.py.")
+    raise FileNotFoundError(f"Notebook 23 runner is missing at {helper_path}. Set repo_root to the updated Git folder.")
 sys.path.insert(0, str(repo_root))
 importlib.invalidate_caches()
 from ml import region_budget_comparison  # noqa: E402
 
-if Path(region_budget_comparison.__file__).resolve() != helper_path:
-    raise RuntimeError("Python cached ml from another checkout. Restart Python and rerun this notebook.")
+loaded_path = Path(region_budget_comparison.__file__).resolve()
+if loaded_path != helper_path:
+    raise RuntimeError(
+        f"Python loaded {loaded_path}, but repo_root points to {helper_path}. "
+        "Open Notebook 23 in the updated Git folder, set repo_root for that folder, and restart Python.")
 
+# A pull can update the file while this session retains the old Python module.
+vars(region_budget_comparison).pop("MODEL_EXPORT_MODE", None)
+region_budget_comparison = importlib.reload(region_budget_comparison)
+if getattr(region_budget_comparison, "MODEL_EXPORT_MODE", None) != "single-write":
+    raise RuntimeError(
+        f"Notebook 23 found an older runner at {helper_path}. Pull experiments/region-budget-comparison "
+        "in that Git folder and check the repo_root widget before rerunning.")
+
+print("Notebook 23 code:", helper_path)
 print(json.dumps(config, indent=2))
 print("Western labels only: model fitting, budget selection and calibration.")
 print("Eastern query geometry is frozen before fitting; eastern labels are evaluated after the gates are frozen.")
@@ -216,13 +231,14 @@ if seeds != [0, 1, 2] or config["n_test_queries"] != 2000 or config["repeats"] !
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Check shared data access before training
+# MAGIC ## Check shared data access and model export before training
 # MAGIC
 # MAGIC Git folders store the experiment code. The existing raw data, query files and histogram exports live
 # MAGIC in the shared Unity Catalog Volume. A personal Git folder in the same Databricks workspace can read
 # MAGIC those paths when the current user/compute has access. Use the same workspace and compute that ran
 # MAGIC Europe notebook09b. This check opens each required input without parsing query labels, and stops before
-# MAGIC expensive preparation if a path is missing or unreadable.
+# MAGIC expensive preparation if a path is missing or unreadable. A small synthetic model also checks that
+# MAGIC the model writer works in the configured output directory.
 
 # COMMAND ----------
 
@@ -253,7 +269,9 @@ if not input_check_table.status.eq("READABLE").all():
         "Databricks workspace/compute as the earlier Europe09b run. If a path exists but is denied, "
         "ask the Volume owner to check USE CATALOG, USE SCHEMA and READ VOLUME for this user. "
         "Keep the existing shared dataset in its Volume; the Git folder only needs the code.")
-print("All selected dataset inputs are readable. The next cell starts the experiment.")
+print("All selected dataset inputs are readable.")
+region_budget_comparison.check_model_export(config["output_root"])
+print("Model export check: PASS (single write)")
 
 # COMMAND ----------
 

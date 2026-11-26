@@ -1,6 +1,7 @@
-"""Exercise real LightGBM export against an append-rejecting Volume stand-in."""
+"""Exercise real LightGBM export with file append disabled."""
 import builtins
 import errno
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,33 +15,43 @@ from ml import shape_team_model
 
 
 class VolumeModelExportTests(unittest.TestCase):
-    def test_real_export_stages_append_locally_and_reloads_identically(self):
+    def test_export_never_appends_and_matches_legacy_model_bytes(self):
         rng = np.random.default_rng(42)
-        frame = pd.DataFrame(rng.random((120, 28)), columns=shape_team_model.TEAM_FEATURES)
-        frame['qId'] = np.arange(len(frame))
-        frame['actual_error'] = rng.uniform(.01, .5, len(frame))
-        frame['split'] = 'train'
-        original_open = builtins.open
+        names = shape_team_model.TEAM_FEATURES
+        frame = pd.DataFrame(rng.random((512, len(names))), columns=names)
+        frame["qId"] = np.arange(len(frame))
+        frame["actual_error"] = .01 + .2 * frame[names[0]]
+        frame["split"] = "train"
+
+        def disable_append(open_file):
+            def guarded_open(file, mode="r", *args, **kwargs):
+                if "a" in mode or "+" in mode:
+                    raise OSError(errno.ESPIPE, "Illegal seek")
+                return open_file(file, mode, *args, **kwargs)
+            return guarded_open
+
         with tempfile.TemporaryDirectory() as root:
             volume = Path(root).resolve()
+            legacy = shape_team_model.fit_team_model(
+                frame, 0, volume/"legacy", model_name="region_west_full_v1")
+            with (patch("builtins.open", side_effect=disable_append(builtins.open)),
+                  patch("io.open", side_effect=disable_append(io.open))):
+                with self.assertRaisesRegex(OSError, "Illegal seek"):
+                    legacy.booster.save_model(str(volume/"old.txt"))
+                comparison.check_model_export(volume)
+                fitted = comparison._fit_and_publish_team_model(frame, 0, volume/"new")
 
-            def no_volume_append(file, mode='r', *args, **kwargs):
-                if isinstance(file, (str, bytes, Path)):
-                    path = Path(file).resolve()
-                    if path.is_relative_to(volume) and ('a' in mode or '+' in mode):
-                        raise OSError(errno.ESPIPE, 'Illegal seek')
-                return original_open(file, mode, *args, **kwargs)
-
-            with patch('builtins.open', side_effect=no_volume_append):
-                with self.assertRaisesRegex(OSError, 'Illegal seek'):
-                    shape_team_model.fit_team_model(frame, 0, volume/'direct')
-                fitted = comparison._fit_and_publish_team_model(frame, 0, volume/'staged')
-            self.assertEqual(fitted.directory, volume/'staged')
-            self.assertTrue((fitted.directory/'training.json').is_file())
-            self.assertIn('pandas_categorical:', (fitted.directory/'model.txt').read_text())
-            self.assertEqual(comparison._sha(fitted.directory/'model.txt'), fitted.schema['model_sha256'])
+            self.assertEqual(set(p.name for p in volume.iterdir()), {"legacy", "old.txt", "new"})
+            self.assertGreater(legacy.schema["best_iteration"], 1)
+            for filename in shape_team_model.MODEL_FILES:
+                with self.subTest(filename=filename):
+                    self.assertEqual((legacy.directory/filename).read_bytes(),
+                                     (fitted.directory/filename).read_bytes())
+            historical = shape_team_model.load_team_model(legacy.directory)
             loaded = shape_team_model.load_team_model(fitted.directory)
-            np.testing.assert_array_equal(fitted.log_scores(frame), loaded.log_scores(frame))
+            np.testing.assert_array_equal(historical.log_scores(frame), loaded.log_scores(frame))
+            self.assertEqual({k: v for k, v in fitted.training_metadata.items() if k != "training_seconds"},
+                             {k: v for k, v in legacy.training_metadata.items() if k != "training_seconds"})
 
 
 if __name__ == '__main__':

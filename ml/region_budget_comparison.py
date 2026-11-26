@@ -21,6 +21,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import traceback
 from uuid import uuid4
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -35,6 +36,7 @@ from . import shape_team_model
 from . import sidecar_workflow as prior
 
 METHODS = ("source_shape", "v1", "fine_direct", "fine_reference")
+MODEL_EXPORT_MODE = "single-write"
 GATE_BYTES = 24  # little-endian float64 cutoff, epsilon, delta, actually loaded
 DEFAULTS = dict(
     repo_root="", output_root="", datasets=[], seeds=[0, 1, 2],
@@ -50,26 +52,81 @@ def _sha(path):
     return prior._sha(Path(path))
 
 
-def _fit_and_publish_team_model(training_table, seed, destination):
-    """Export locally: LightGBM appends metadata, unsupported on Volume FUSE.
+def _write_lightgbm_model(booster, path):
+    # model_to_string includes LightGBM's pandas metadata. save_model reopens
+    # the file in append mode to add that metadata, which fails on Volumes.
+    payload = booster.model_to_string().encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    try:
+        path.write_bytes(payload)
+        if _sha(path) != digest:
+            raise OSError(f"Model verification failed after writing {path}")
+    except OSError as error:
+        error.add_note(f"Notebook 23 could not write or read back its model at {path}")
+        raise
+    return digest
 
-    Publish complete, unchanged artifacts with sequential writes only. Verify
-    every copy before returning a model whose directory survives temp cleanup.
-    """
-    destination = Path(destination)
-    with tempfile.TemporaryDirectory(prefix="region-model-", dir="/tmp") as staging:
-        model = shape_team_model.fit_team_model(
-            training_table, seed, Path(staging)/"model",
-            model_name="region_west_full_v1")
-        destination.mkdir(parents=True, exist_ok=False)
-        for source in sorted(model.directory.iterdir()):
-            target = destination/source.name
-            with source.open("rb") as reader, target.open("wb") as writer:
-                shutil.copyfileobj(reader, writer)
-            if source.stat().st_size != target.stat().st_size or _sha(source) != _sha(target):
-                raise OSError("Model artifact copy verification failed: " + str(target))
-        model.directory = destination
-    return model
+
+def check_model_export(output_root):
+    """Verify the production writer with a tiny synthetic model at this destination."""
+    import lightgbm as lgb
+
+    output = Path(output_root)
+    output.mkdir(parents=True, exist_ok=True)
+    data = lgb.Dataset(np.arange(4, dtype=float).reshape(-1, 1), label=[0., 0., 1., 1.])
+    booster = lgb.train({"verbosity": -1, "num_threads": 1, "min_data_in_leaf": 1,
+                         "min_data_in_bin": 1}, data, num_boost_round=1)
+    with tempfile.TemporaryDirectory(prefix=".model-export-check-", dir=output) as scratch:
+        _write_lightgbm_model(booster, Path(scratch)/"model.txt")
+
+
+def _fit_and_publish_team_model(training_table, seed, destination):
+    """Fit the same western v1 learner and write its artifacts sequentially."""
+    # The older Shape comparison fingerprints its training helper for frozen
+    # runs. Keep that helper intact and reuse the team's training entry point.
+    model_name = "region_west_full_v1"
+    names = list(shape_team_model.TEAM_FEATURES)
+    matrix = shape_team_model._matrix(training_table, names)
+    qids = training_table.qId.to_numpy()
+    target = training_table.actual_error.to_numpy(float)
+    if not training_table.split.eq("train").fillna(False).all():
+        raise ValueError("Notebook 23 v1 may only fit western TRAIN rows")
+    if (qids.dtype.kind not in "iu" or (qids < 0).any() or len(np.unique(qids)) < 12
+            or not np.isfinite(target).all() or (target < 0).any()):
+        raise ValueError("TRAIN needs at least 12 valid query IDs and finite nonnegative actual errors")
+
+    table = matrix.copy()
+    table["qId"] = qids
+    table["label"] = np.log(np.maximum(target, features.LABEL_FLOOR))
+    parameters = {**gate_eval.PARAMS, "n_jobs": 2}
+    started = time.perf_counter()
+    model = gate_eval.fit(table, names, int(seed), params=parameters)
+    training_seconds = time.perf_counter() - started
+
+    destination.mkdir(parents=True, exist_ok=False)
+    model_sha = _write_lightgbm_model(model.booster_, destination/"model.txt")
+    properties = destination/"model.properties"
+    properties.write_text("label.transform=log\n", encoding="utf-8")
+    schema = dict(schema_version=shape_team_model.SCHEMA_VERSION, family="team_v1_LightGBM",
+        model_name=model_name, feature_names=names, augmented=False, label_transform="log",
+        label_floor=features.LABEL_FLOOR, model_sha256=model_sha, model_properties_sha256=_sha(properties),
+        implementation_sha256=shape_team_model._implementation_hashes(), seed=int(seed),
+        best_iteration=int(model.best_iteration_), parameters=parameters,
+        inner_validation="every tenth sorted outer-TRAIN qId, unchanged gate_eval.fit", refit_held_back=False)
+    _json(destination/"model.schema.json", schema)
+    fitted = shape_team_model.TeamModel(model.booster_, schema, destination)
+    train_ids = sorted(map(int, np.unique(qids)))
+    validation_ids = train_ids[::10]
+    validation_rows = int(table.qId.isin(validation_ids).sum())
+    fitted.training_metadata = dict(model_name=model_name, seed=int(seed), train_queries=len(train_ids),
+        train_rows=len(table), inner_fit_rows=len(table)-validation_rows, inner_validation_rows=validation_rows,
+        training_seconds=training_seconds, training_includes_inner_validation=True,
+        best_iteration=schema["best_iteration"], runtime_model_bytes=fitted.model_bytes, feature_count=len(names),
+        target_column="actual_error", outer_train_qIds=train_ids, inner_validation_qIds=validation_ids,
+        target_sha256=hashlib.sha256(np.ascontiguousarray(target, np.float64).tobytes()).hexdigest(),
+        feature_matrix_sha256=hashlib.sha256(np.ascontiguousarray(matrix, np.float64).tobytes()).hexdigest())
+    _json(destination/"training.json", fitted.training_metadata)
+    return fitted
 
 
 def _safe(value):
@@ -387,6 +444,7 @@ def _prepare_dataset(c, item, root, classpath):
         selected = _select(train.qId, c["max_train_queries"], seed+117)
         train = train[train.qId.isin(selected)].copy(); train["split"] = "train"
         model_dir = payload/f"v1_seed_{seed}"
+        print(f"{item['dataset']}: fitting v1 (seed {seed}, {len(train)} western TRAIN queries)", flush=True)
         model = _fit_and_publish_team_model(train, seed, model_dir)
         models[seed] = model_dir
         cal = _select(roles.loc[roles.split.eq("calibration"), "qId"], c["n_calibration_queries"], seed+913)
@@ -657,8 +715,10 @@ def run_suite(config):
     output=Path(c["output_root"]);output.mkdir(parents=True,exist_ok=True)
     root=output/("region-budget-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")+"-"+uuid4().hex[:8])
     root.mkdir();started=time.perf_counter()
-    state=dict(status="preparing",config=c,started_utc=_now(),measured_datasets=[],test_labels_used_for_selection=False)
+    state=dict(status="preparing",config=c,started_utc=_now(),measured_datasets=[],
+        test_labels_used_for_selection=False, model_export_mode=MODEL_EXPORT_MODE)
     _json(root/"manifest.json",state)
+    print("Run directory:",root,flush=True)
     try:
         classpath,build=_build_java(c,root);state["java_build"]=build
         state["java_version"]=subprocess.run([c["java"],"-version"],capture_output=True,text=True).stderr
@@ -702,7 +762,12 @@ def run_suite(config):
         print("Completed:",root,flush=True)
         return root
     except BaseException as error:
-        state.update(status="failed",error=str(error),failed_utc=_now());_json(root/"manifest.json",state)
+        state.update(status="failed",error=str(error),failed_utc=_now())
+        try:
+            _json(root/"manifest.json",state)
+            (root/"failure.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError as log_error:
+            error.add_note(f"Could not save failure details in {root}: {log_error}")
         raise
 
 
