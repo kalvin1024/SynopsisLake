@@ -97,6 +97,13 @@ Use a classic runtime with Java and access to the actual Volume. Import/open not
 Git checkout. Run the dependency cell, review widgets, then run the remaining cells. Python modules from
 another checkout must not remain cached; restart Python after pulling changed implementation files.
 
+The notebook's input-access check runs before model fitting. It confirms the raw sources, matching query
+file and selected H are readable without parsing query labels. A personal Git folder does not need its
+own copy of Europe: in the same Databricks workspace, it can use the existing shared Volume under the
+current user's permissions. Prefer the same compute used for the successful Europe09b run. If access is
+denied, the Volume owner must check USE CATALOG, USE SCHEMA and READ VOLUME; changing Git branches
+does not grant data permissions. The check reports missing/unreadable paths before expensive training.
+
 The standard Volume root is:
 
 ```text

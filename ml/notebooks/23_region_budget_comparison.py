@@ -216,6 +216,48 @@ if seeds != [0, 1, 2] or config["n_test_queries"] != 2000 or config["repeats"] !
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Check shared data access before training
+# MAGIC
+# MAGIC Git folders store the experiment code. The existing raw data, query files and histogram exports live
+# MAGIC in the shared Unity Catalog Volume. A personal Git folder in the same Databricks workspace can read
+# MAGIC those paths when the current user/compute has access. Use the same workspace and compute that ran
+# MAGIC Europe notebook09b. This check opens each required input without parsing query labels, and stops before
+# MAGIC expensive preparation if a path is missing or unreadable.
+
+# COMMAND ----------
+
+import pandas as pd
+
+input_checks = []
+for dataset_config in config["datasets"]:
+    try:
+        resolved = region_budget_comparison._dataset_inputs(dataset_config, config)
+        paths = [Path(resolved["queries_file"]), resolved["H_path"],
+                 *resolved["sources"], *resolved["raw_paths"]]
+        for path in paths:
+            with path.open("rb") as stream:
+                stream.read(1)  # Access check only; no query labels are parsed.
+        input_checks.append(dict(dataset=resolved["dataset"], status="READABLE",
+            raw_source_files=len(resolved["raw_paths"]), actual_merge_rate=resolved["actual_rate"],
+            raw_data_dir=resolved["data_dir"], queries_file=resolved["queries_file"], detail=""))
+    except (OSError, ValueError, KeyError) as error:
+        input_checks.append(dict(dataset=dataset_config["dataset"], status="MISSING_OR_UNREADABLE",
+            raw_source_files=None, actual_merge_rate=None,
+            raw_data_dir=dataset_config.get("data_dir", ""),
+            queries_file=dataset_config.get("queries_file", ""), detail=str(error)))
+input_check_table = pd.DataFrame(input_checks)
+display(input_check_table) if "display" in globals() else print(input_check_table.to_string(index=False))
+if not input_check_table.status.eq("READABLE").all():
+    raise RuntimeError(
+        "Input access check failed before training. Check the displayed Volume paths and use the same "
+        "Databricks workspace/compute as the earlier Europe09b run. If a path exists but is denied, "
+        "ask the Volume owner to check USE CATALOG, USE SCHEMA and READ VOLUME for this user. "
+        "Keep the existing shared dataset in its Volume; the Git folder only needs the code.")
+print("All selected dataset inputs are readable. The next cell starts the experiment.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Execute the frozen comparison
 # MAGIC
 # MAGIC This is a new experiment, not a replay of the old query-split numbers. It prepares the required summaries,
