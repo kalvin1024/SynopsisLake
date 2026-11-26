@@ -36,6 +36,8 @@ from . import shape_team_model
 from . import sidecar_workflow as prior
 
 METHODS = ("source_shape", "v1", "fine_direct", "fine_reference")
+MATCHED_REGION_PROTOCOL = 1
+MATCHED_METHODS = ("source_shape", "fine_reference", "fine_direct")
 MODEL_EXPORT_MODE = "single-write"
 GATE_BYTES = 24  # little-endian float64 cutoff, epsilon, delta, actually loaded
 DEFAULTS = dict(
@@ -45,6 +47,7 @@ DEFAULTS = dict(
     train_min_exact=10, total_budget_bytes=0, shape_packet_budget_bytes=0,
     repeats=3, chunk_size=250000, include_fine_reference=True,
     java="java", javac="javac", classpath="", jar_path="", math3_path="",
+    methods=None, prior_results_zip="", dataset_budget_bytes=None,
 )
 
 
@@ -258,6 +261,23 @@ def _config(config):
         raise ValueError("Invalid error/calibration targets")
     if not 0 < c["merge_rate"] <= 1:
         raise ValueError("merge_rate must lie in (0,1]")
+    if c["prior_results_zip"]:
+        c["prior_results_zip"] = str(Path(c["prior_results_zip"]).expanduser().resolve())
+        selected = tuple(c["methods"] if c["methods"] is not None else MATCHED_METHODS)
+        if len(selected) != len(MATCHED_METHODS) or set(selected) != set(MATCHED_METHODS):
+            raise ValueError("The SS-matched study requires source_shape, fine_reference and fine_direct")
+        c["methods"] = list(MATCHED_METHODS)
+        budgets = c["dataset_budget_bytes"]
+        datasets = {d["dataset"] for d in c["datasets"]}
+        if not isinstance(budgets, dict) or set(budgets) != datasets or any(
+                type(value) is not int or value < 1 for value in budgets.values()):
+            raise ValueError("Set one positive integer dataset_budget_bytes cap for each selected dataset")
+        if c["total_budget_bytes"] or c["shape_packet_budget_bytes"]:
+            raise ValueError("The matched study uses the verified per-dataset SS budget only")
+    else:
+        if c["dataset_budget_bytes"] is not None or c["methods"] is not None:
+            raise ValueError("Per-dataset budgets and method selection require prior_results_zip")
+        c["methods"] = list(METHODS if c["include_fine_reference"] else METHODS[:3])
     return c
 
 
@@ -399,17 +419,34 @@ def _native_size(sources):
     return int(total), int(cells)
 
 
+def _matched_prior(c, inputs):
+    from .region_budget_matched_inputs import load_prior
+
+    return load_prior(c, inputs)
+
+
 def _prepare_dataset(c, item, root, classpath):
     folder = root/item["dataset"]; folder.mkdir()
     payload = folder/"payload"; payload.mkdir()
     H = features.load_hist(item["H_path"])
     prior.save_histogram(payload/"H.hist", H)
-    source_dir = payload/"sources"; source_dir.mkdir()
-    for p in item["sources"]: shutil.copyfile(p, source_dir/p.name)
+    matched = item.get("matched_prior")
+    if matched is not None and _sha(payload/"H.hist") != matched["h_sha256"]:
+        raise ValueError("Serialized H differs from the previous run: " + item["dataset"])
+    use_v1 = "v1" in c["methods"]
+    if use_v1:
+        source_dir = payload/"sources"; source_dir.mkdir()
+        for p in item["sources"]: shutil.copyfile(p, source_dir/p.name)
     geometry = _read_geometry(item["queries_file"])
-    members, cut = region_memberships(geometry, item.get("region_cut"))
+    cut = matched["region_cut"] if matched is not None else item.get("region_cut")
+    members, cut = region_memberships(geometry, cut)
     members.to_csv(folder/"region_memberships.csv", index=False)
-    test_ids = _select(members.loc[members.region.eq("east"), "qId"], c["n_test_queries"], 90127)
+    if matched is None:
+        test_ids = _select(members.loc[members.region.eq("east"), "qId"], c["n_test_queries"], 90127)
+    else:
+        test_ids = matched["test_ids"]
+        pd.DataFrame({"source_qId": matched["previous_ids"]}).to_csv(
+            folder/"previous_east_query_ids.csv", index=False)
     if not len(test_ids): raise ValueError("No wholly eastern test queries: "+item["dataset"])
     test_file = folder/"test_queries_geometry_only.csv"
     _query_file(test_file, members, test_ids)
@@ -424,48 +461,61 @@ def _prepare_dataset(c, item, root, classpath):
     if not np.array_equal(audit.answer.to_numpy(float),saved):
         raise ValueError("Western saved labels do not match real raw counts; correct the dataset before fitting")
     pd.DataFrame(dict(source_qId=audit_ids,saved_truth=saved,raw_truth=audit.answer)).to_csv(folder/"west_truth_parity.csv",index=False)
-    west_file = folder/"west_queries_geometry_only.csv"
-    _query_file(west_file, members, west_ids)
-    feature_file = folder/"west_features_java.csv"
-    answers, _ = _java(c, classpath, folder/"west_feature_extraction", "v1_features", west_file,
-        score_only=True, paths={"answerHist":payload/"H.hist", "sourceDir":source_dir}, feature_out=feature_file)
-    matrix = pd.read_csv(feature_file)
-    if len(matrix) != len(west_ids) or not np.array_equal(matrix.qId, np.arange(len(west_ids))):
-        raise ValueError("Java TRAIN feature rows are not aligned")
-    matrix["qId"] = west_ids
-    matrix["actual_error"] = relative_error(answers.candidate, np.array([west_truth[int(q)] for q in west_ids]))
-    matrix["truth"] = [west_truth[int(q)] for q in west_ids]
+    if use_v1:
+        west_file = folder/"west_queries_geometry_only.csv"
+        _query_file(west_file, members, west_ids)
+        feature_file = folder/"west_features_java.csv"
+        answers, _ = _java(c, classpath, folder/"west_feature_extraction", "v1_features", west_file,
+            score_only=True, paths={"answerHist":payload/"H.hist", "sourceDir":source_dir}, feature_out=feature_file)
+        matrix = pd.read_csv(feature_file)
+        if len(matrix) != len(west_ids) or not np.array_equal(matrix.qId, np.arange(len(west_ids))):
+            raise ValueError("Java TRAIN feature rows are not aligned")
+        matrix["qId"] = west_ids
+        matrix["actual_error"] = relative_error(answers.candidate, np.array([west_truth[int(q)] for q in west_ids]))
+        matrix["truth"] = [west_truth[int(q)] for q in west_ids]
     all_roles, models, calibration_ids, train_records = [], {}, {}, []
     for seed in c["seeds"]:
         roles = source_roles(members, seed, c["calibration_fraction"])
-        all_roles.append(roles)
-        train_ids = set(roles.loc[roles.split.eq("train"), "qId"])
-        train = matrix[matrix.qId.isin(train_ids) & (matrix.truth >= c["train_min_exact"])].copy()
-        selected = _select(train.qId, c["max_train_queries"], seed+117)
-        train = train[train.qId.isin(selected)].copy(); train["split"] = "train"
-        model_dir = payload/f"v1_seed_{seed}"
-        print(f"{item['dataset']}: fitting v1 (seed {seed}, {len(train)} western TRAIN queries)", flush=True)
-        model = _fit_and_publish_team_model(train, seed, model_dir)
-        models[seed] = model_dir
         cal = _select(roles.loc[roles.split.eq("calibration"), "qId"], c["n_calibration_queries"], seed+913)
         calibration_ids[seed] = cal
         _query_file(folder/f"calibration_seed_{seed}.csv", members, cal)
-        train_records.append(dict(seed=seed, train_queries=len(train), calibration_queries=len(cal),
-            model_bytes=(model_dir/"model.txt").stat().st_size,
-            training_seconds=model.training_metadata["training_seconds"]))
+        if matched is not None:
+            roles.loc[roles.split.eq("train"), "split"] = "west_unused"
+            roles.loc[roles.region.eq("east"), "split"] = "east_unused"
+            roles.loc[roles.qId.isin(matched["previous_ids"]), "split"] = "previous_test"
+            roles.loc[roles.qId.isin(test_ids), "split"] = "test"
+        all_roles.append(roles)
+        if use_v1:
+            train_ids = set(roles.loc[roles.split.eq("train"), "qId"])
+            train = matrix[matrix.qId.isin(train_ids) & (matrix.truth >= c["train_min_exact"])].copy()
+            selected = _select(train.qId, c["max_train_queries"], seed+117)
+            train = train[train.qId.isin(selected)].copy(); train["split"] = "train"
+            model_dir = payload/f"v1_seed_{seed}"
+            print(f"{item['dataset']}: fitting v1 (seed {seed}, {len(train)} western TRAIN queries)", flush=True)
+            model = _fit_and_publish_team_model(train, seed, model_dir)
+            models[seed] = model_dir
+            train_records.append(dict(seed=seed, train_queries=len(train), calibration_queries=len(cal),
+                model_bytes=(model_dir/"model.txt").stat().st_size,
+                training_seconds=model.training_metadata["training_seconds"]))
     pd.concat(all_roles, ignore_index=True).to_csv(folder/"region_splits.csv", index=False)
-    pd.DataFrame(train_records).to_csv(folder/"training_costs.csv", index=False)
+    if use_v1:
+        pd.DataFrame(train_records).to_csv(folder/"training_costs.csv", index=False)
     native_bytes, cells = _native_size(item["sources"])
     hbytes = (payload/"H.hist").stat().st_size
-    source_bytes = sum(p.stat().st_size for p in source_dir.glob("src_*.txt"))
-    v1_floor = max(hbytes+source_bytes+(p/"model.txt").stat().st_size+(p/"model.properties").stat().st_size+GATE_BYTES for p in models.values())
+    v1_floor = None
+    if use_v1:
+        source_bytes = sum(p.stat().st_size for p in source_dir.glob("src_*.txt"))
+        v1_floor = max(hbytes+source_bytes+(p/"model.txt").stat().st_size+(p/"model.properties").stat().st_size+GATE_BYTES for p in models.values())
     ss_floor = hbytes+native_bytes+64+8*len(item["sources"])+(cells+7)//8+GATE_BYTES
+    minimum = max(ss_floor, v1_floor or 0, GATE_BYTES+fine.payload_bytes(1)
+                  + (hbytes if "fine_reference" in c["methods"] else 0))
     info = dict(item, folder=folder, payload=payload, H=H, models=models, calibration_ids=calibration_ids,
         west_truth=west_truth, test_ids=test_ids, test_file=test_file, region_cut=cut, members=members,
-        native_bytes=native_bytes, source_cells=cells, budget_floor=max(v1_floor, ss_floor))
-    _json(folder/"preparation.json", dict(dataset=item["dataset"], status="west_models_fitted_no_east_labels_used",
+        native_bytes=native_bytes, source_cells=cells, budget_floor=minimum)
+    _json(folder/"preparation.json", dict(dataset=item["dataset"], status="west_calibration_inputs_ready_no_east_labels_used",
         region_cut=cut, strict_whole_rectangle=True, region_counts=members.region.value_counts().to_dict(),
         test_queries=len(test_ids), test_geometry_sha256=_sha(test_file), actual_merge_rate=item["actual_rate"],
+        prior_test_excluded=len(matched["previous_ids"]) if matched is not None else 0,
         v1_budget_floor=v1_floor, ss_budget_floor=ss_floor, train_calibration_side="west only",
         query_file_sha256=_sha(item["queries_file"]),original_H_sha256=_sha(item["H_path"]),
         source_histogram_sha256={p.name:_sha(p) for p in item["sources"]},
@@ -499,12 +549,26 @@ def _files_for(info, method, seed, gate):
 
 def _freeze_dataset(c, info, budget, classpath, methods):
     folder, p = info["folder"], info["payload"]
+    matched = info.get("matched_prior")
     hbytes = (p/"H.hist").stat().st_size
     packet_cap = budget-hbytes-info["native_bytes"]-GATE_BYTES
     if c["shape_packet_budget_bytes"]: packet_cap=min(packet_cap, c["shape_packet_budget_bytes"])
+    if matched is not None:
+        # The prior allocation cap is also stored in the packet header. Reuse
+        # it to reproduce the same bytes, then enforce the measured payload cap.
+        packet_cap = matched["shape_packet_budget"]
     shape_path = shape_e2e_inputs.prepare_shape_metadata(info["run_dir"], info["data_dir"], p/"source_shape",
         packet_budget_bytes=packet_cap, chunk_size=c["chunk_size"])
     shape_meta = json.loads((shape_path/"manifest.json").read_text())
+    if matched is not None:
+        raw_hashes = {v["source_id"]: v["raw_sha256"] for v in shape_meta["source_inputs"]}
+        shape_hashes = {name: digest for name, digest in shape_meta["artifact_sha256"].items()
+                        if name == "shape.bin" or name.startswith("native/")}
+        ss_bytes = hbytes + GATE_BYTES + sum((shape_path/name).stat().st_size for name in shape_hashes)
+        if raw_hashes != matched["raw_sha256"] or shape_hashes != matched["shape_artifact_sha256"]:
+            raise ValueError(f"{info['dataset']}: raw data or rebuilt SS payload differs from the prior run")
+        if ss_bytes != budget:
+            raise ValueError(f"{info['dataset']}: SS uses {ss_bytes} bytes, expected exactly {budget}")
     roots=[features.load_hist(v) for v in info["sources"]]
     root=(min(v[1][0] for v in roots),max(v[1][-1] for v in roots),min(v[2][0] for v in roots),max(v[2][-1] for v in roots))
     # Construct the largest direct grid, then stream once more only if the
@@ -562,6 +626,12 @@ def _freeze_dataset(c, info, budget, classpath, methods):
         fine_direct=dict(answer="fine count estimate F",score="count-derived worst relative-error interval bound; finite west-calibrated threshold"),
         fine_reference=dict(answer="unchanged H",score="abs(H-F)/max(F,1)",separate_payload_budget=True),
         stored_test_labels_accessed=False,test_truth="independent Java raw scan after this lock")
+    if matched is not None:
+        lock.update(prior_archive_sha256=matched["archive_sha256"],
+            test_id_mapping_sha256=_sha(str(info["test_file"])+".ids.csv"),
+            previous_east_ids_sha256=_sha(folder/"previous_east_query_ids.csv"),
+            previous_east_ids_excluded=len(matched["previous_ids"]),
+            original_H_sha256=matched["h_sha256"], ss_payload_matches_prior=True)
     _json(folder/"protocol.json",lock)
     info["protocol_sha256"]=_sha(folder/"protocol.json")
 
@@ -575,6 +645,10 @@ def _phase_records(record, dataset):
 def _evaluate_dataset(c,info,classpath,methods):
     folder=info["folder"];jobs=[]
     frozen=json.loads((folder/"protocol.json").read_text())
+    if info.get("matched_prior") is not None and (
+            _sha(info["test_file"]) != frozen["test_geometry_sha256"] or
+            _sha(str(info["test_file"])+".ids.csv") != frozen["test_id_mapping_sha256"]):
+        raise RuntimeError("Frozen test queries or source IDs changed")
     for item in frozen["payload_files"]:
         if Path(item["path"]).stat().st_size!=item["bytes"] or _sha(item["path"])!=item["sha256"]:
             raise RuntimeError("Frozen runtime payload changed: "+item["path"])
@@ -664,7 +738,7 @@ def _evaluate_dataset(c,info,classpath,methods):
     return summary
 
 
-def _report(root,summary):
+def _report(root,summary,*,matched=False):
     contrast=[]
     for dataset,rows in summary.groupby("dataset",sort=False):
         exact=rows[rows.method.eq("exact")].iloc[0]
@@ -679,16 +753,20 @@ def _report(root,summary):
                 min_actual_bytes=part.used_bytes.min(),max_actual_bytes=part.used_bytes.max()))
     pd.DataFrame(contrast).to_csv(root/"dataset_contrast.csv",index=False)
     tables=summary[["dataset","seed","method","coverage","accepted_count","accepted_bad_count","violation","fallback_count","batch_median_s","exact_batch_median_s","seconds_saved_vs_exact","used_bytes"]].copy()
+    design = (
+        "Calibration uses only western query labels. Each dataset's three methods share its prior Source Shape byte ceiling. Eastern queries exclude the previous test IDs. Both datasets' gates freeze before Java scans the east for truth.\n\n"
+        if matched else
+        "Training and calibration use only whole-rectangle western queries. Eastern truth is generated by real Java exact scans after models, global budget, representations and gates are frozen. All rows share one total-byte ceiling.\n\n"
+    )
     (root/"analysis_en.md").write_text(
-        "# Held-out-region, common-budget comparison\n\n"
-        "Training and calibration use only whole-rectangle western queries. Eastern truth is generated by real Java exact scans after models, global budget, representations and gates are frozen. Crossing rectangles are excluded geometrically.\n\n"
-        "All rows share the same total-byte ceiling across methods and the datasets in this suite. Actual usage and unused bytes are reported; no padding or free models/source summaries. Fine direct returns F and uses a count-derived uncertainty score. Fine reference retains H and uses F only to score H; it is a separate control.\n\n"
+        "# Held-out-region storage comparison\n\n" + design +
+        "Crossing rectangles are excluded. Actual usage and unused bytes are reported. Fine direct returns F and uses a count-derived uncertainty score. Fine reference retains H and uses F only to score H.\n\n"
         "The primary cohort contains all frozen test IDs; truth>=10 is a post-freeze evaluation slice only. Zero accepted answers have undefined risk. Source-calibrated5% risk may not transfer east: do not retune on these test labels.\n\n"
         "Batch time is the median of Java startup, all method-required payload loads, raw-data loading, actual fallback scans and CSV-to-Parquet conversion. Raw points are loaded once per JVM; OS cache is uncontrolled. Offline model training, summary construction and calibration are reported separately. Repeated seeds share the eastern query geometry and are not independent datasets.\n\n"
         +tables.to_csv(index=False)+"\n\n"
         "Use dataset_contrast.csv with phase_timing.csv, raw point counts and fallback counts to inspect differences between AUTHORS and Europe. These observations do not isolate a causal effect of data volume or density. Do not combine these strict source-calibrated results with the old target-calibrated region test or prior09b timing cells.\n")
     css="body{font:15px system-ui;color:#17243f;margin:24px;background:#f7f7f4}table{border-collapse:collapse;background:white}td,th{border:1px solid #cdd5df;padding:7px;white-space:nowrap}th{background:#e5ebf4}.scroll{overflow:auto}p{max-width:1000px;line-height:1.6}"
-    (root/"report.html").write_text('<!doctype html><meta charset="utf-8"><title>Region budget comparison</title><style>'+css+'</style><h1>Held-out-region comparison</h1><p>Source-west training/calibration, frozen east test. Same total storage ceiling; actual bytes, risk and time must be read together. Zero-acceptance risk is undefined.</p><div class="scroll">'+tables.to_html(index=False,na_rep='—',float_format=lambda v:f'{v:.4f}')+'</div><h2>Dataset contrast</h2><div class="scroll">'+pd.DataFrame(contrast).to_html(index=False,na_rep='—',float_format=lambda v:f'{v:.4f}')+'</div>')
+    (root/"report.html").write_text('<!doctype html><meta charset="utf-8"><title>Region budget comparison</title><style>'+css+'</style><h1>Held-out-region comparison</h1><p>'+design.strip()+' Zero-acceptance risk is undefined.</p><div class="scroll">'+tables.to_html(index=False,na_rep='—',float_format=lambda v:f'{v:.4f}')+'</div><h2>Dataset contrast</h2><div class="scroll">'+pd.DataFrame(contrast).to_html(index=False,na_rep='—',float_format=lambda v:f'{v:.4f}')+'</div>')
 
 
 def _archive(root,c):
@@ -703,6 +781,9 @@ def _archive(root,c):
             for rel in ["ml/region_budget_comparison.py","ml/region_budget_histogram.py","SynopsisLake/src/main/java/sigspatial25/RegionBudgetQueryExp.java","SynopsisLake/src/main/java/predictor/CountHistogramPayload.java"]:
                 p=Path(c["repo_root"])/rel
                 if p.is_file():z.write(p,"implementation/"+rel)
+            if c["prior_results_zip"]:
+                for rel in ("ml/region_budget_matched_inputs.py", "ml/region_budget_matched_report.py"):
+                    z.write(Path(c["repo_root"])/rel, "implementation/"+rel)
         dest=root/"region_budget_results.zip"
         with tmp.open("rb") as src,dest.open("wb") as out:shutil.copyfileobj(src,out)
     finally:tmp.unlink(missing_ok=True)
@@ -712,11 +793,19 @@ def run_suite(config):
     c=_config(config)
     # Fail on missing datasets before starting an expensive partial suite.
     inputs=[_dataset_inputs(item,c) for item in c["datasets"]]
+    matched = bool(c["prior_results_zip"])
+    if matched:
+        prior_metadata = _matched_prior(c, inputs)
+        for item in inputs:
+            item["matched_prior"] = prior_metadata[item["dataset"]]
     output=Path(c["output_root"]);output.mkdir(parents=True,exist_ok=True)
     root=output/("region-budget-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")+"-"+uuid4().hex[:8])
     root.mkdir();started=time.perf_counter()
     state=dict(status="preparing",config=c,started_utc=_now(),measured_datasets=[],
         test_labels_used_for_selection=False, model_export_mode=MODEL_EXPORT_MODE)
+    if matched:
+        state.update(protocol_version=MATCHED_REGION_PROTOCOL, prior_archive_sha256=next(iter(prior_metadata.values()))["archive_sha256"],
+            selected_methods=c["methods"], prior_test_ids_excluded=True)
     _json(root/"manifest.json",state)
     print("Run directory:",root,flush=True)
     try:
@@ -727,15 +816,27 @@ def run_suite(config):
             databricks_runtime=os.environ.get("DATABRICKS_RUNTIME_VERSION"),cache="raw loaded once per JVM; OS cache uncontrolled")
         state["implementation_sha256"]={name:_sha(Path(__file__).with_name(name)) for name in (
             "region_budget_comparison.py","region_budget_histogram.py","shape_e2e_inputs.py","shape_team_model.py","gate_eval.py")}
+        if matched:
+            for name in ("region_budget_matched_inputs.py", "region_budget_matched_report.py"):
+                state["implementation_sha256"][name] = _sha(Path(__file__).with_name(name))
         info=[_prepare_dataset(c,item,root,classpath) for item in inputs]
-        floor=max(v["budget_floor"] for v in info)
-        budget=c["total_budget_bytes"] or int(math.ceil(floor/1024)*1024)
-        if budget<floor:raise ValueError(f"total_budget_bytes={budget} cannot fit west-trained v1/SS minimum {floor}; do not silently omit model/source costs")
-        state.update(status="budget_frozen_before_east_labels",total_budget_bytes=budget,budget_floor=floor,
-            budget_rule="explicit preset or1024-byte-rounded max of source-trained model/representation minimums across requested datasets")
+        if matched:
+            budgets = c["dataset_budget_bytes"]
+            state.update(dataset_budget_bytes=budgets, budget_rule="prior Source Shape actual bytes per dataset")
+        else:
+            floor=max(v["budget_floor"] for v in info)
+            budget=c["total_budget_bytes"] or int(math.ceil(floor/1024)*1024)
+            budgets={item["dataset"]:budget for item in info}
+            state.update(total_budget_bytes=budget,budget_floor=floor,
+                budget_rule="explicit preset or1024-byte-rounded max of source-trained model/representation minimums across requested datasets")
+        for item in info:
+            cap = budgets[item["dataset"]]
+            if cap < item["budget_floor"]:
+                raise ValueError(f"{item['dataset']}: byte cap {cap} cannot fit the selected methods' minimum {item['budget_floor']}")
+        state["status"] = "budget_frozen_before_east_labels"
         _json(root/"manifest.json",state)
-        methods=METHODS if c["include_fine_reference"] else METHODS[:3]
-        for item in info:_freeze_dataset(c,item,budget,classpath,methods)
+        methods=c["methods"]
+        for item in info:_freeze_dataset(c,item,budgets[item["dataset"]],classpath,methods)
         state["status"]="all_dataset_gates_frozen_before_east_labels";_json(root/"manifest.json",state)
         result=[]
         for item in info:
@@ -743,13 +844,19 @@ def run_suite(config):
             _json(root/"manifest.json",state)
         summary=pd.concat(result,ignore_index=True);summary.to_csv(root/"summary.csv",index=False)
         for name in ("payload_costs.csv","payload_files.csv","timing.csv","phase_timing.csv","region_splits.csv","calibration.csv","frozen_gates.csv","training_costs.csv","offline_costs.csv","calibration_scores.csv"):
+            if name == "training_costs.csv" and "v1" not in methods:
+                continue
             pieces=[]
             for item in info:
                 f=pd.read_csv(item["folder"]/name)
                 if "dataset" not in f:f.insert(0,"dataset",item["dataset"])
                 pieces.append(f)
             pd.concat(pieces,ignore_index=True).to_csv(root/name,index=False)
-        _report(root,summary)
+        _report(root,summary,matched=matched)
+        if matched:
+            from .region_budget_matched_report import write_report
+
+            write_report(root, summary, c["delta"])
         state.update(status="complete",finished_utc=_now(),suite_seconds=time.perf_counter()-started,
             no_target_label_tuning=True,primary_cohort="all geometry-frozen whole-east test IDs",exact_truth_source="real raw scans after freeze")
         _json(root/"manifest.json",state)
