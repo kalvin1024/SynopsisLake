@@ -50,6 +50,28 @@ def _sha(path):
     return prior._sha(Path(path))
 
 
+def _fit_and_publish_team_model(training_table, seed, destination):
+    """Export locally: LightGBM appends metadata, unsupported on Volume FUSE.
+
+    Publish complete, unchanged artifacts with sequential writes only. Verify
+    every copy before returning a model whose directory survives temp cleanup.
+    """
+    destination = Path(destination)
+    with tempfile.TemporaryDirectory(prefix="region-model-", dir="/tmp") as staging:
+        model = shape_team_model.fit_team_model(
+            training_table, seed, Path(staging)/"model",
+            model_name="region_west_full_v1")
+        destination.mkdir(parents=True, exist_ok=False)
+        for source in sorted(model.directory.iterdir()):
+            target = destination/source.name
+            with source.open("rb") as reader, target.open("wb") as writer:
+                shutil.copyfileobj(reader, writer)
+            if source.stat().st_size != target.stat().st_size or _sha(source) != _sha(target):
+                raise OSError("Model artifact copy verification failed: " + str(target))
+        model.directory = destination
+    return model
+
+
 def _safe(value):
     if isinstance(value, dict):
         return {str(k): _safe(v) for k, v in value.items()}
@@ -365,7 +387,7 @@ def _prepare_dataset(c, item, root, classpath):
         selected = _select(train.qId, c["max_train_queries"], seed+117)
         train = train[train.qId.isin(selected)].copy(); train["split"] = "train"
         model_dir = payload/f"v1_seed_{seed}"
-        model = shape_team_model.fit_team_model(train, seed, model_dir, model_name="region_west_full_v1")
+        model = _fit_and_publish_team_model(train, seed, model_dir)
         models[seed] = model_dir
         cal = _select(roles.loc[roles.split.eq("calibration"), "qId"], c["n_calibration_queries"], seed+913)
         calibration_ids[seed] = cal
